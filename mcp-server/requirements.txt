@@ -1,0 +1,6 @@
+mcp[cli]
+psycopg2-binary
+pgvector
+uvicorn
+sentence-transformers
+numpy
