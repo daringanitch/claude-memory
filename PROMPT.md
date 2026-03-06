@@ -130,7 +130,3 @@ claude-memory/
     └── server.py
 ```
 
-After building, also:
-- Initialize a git repo, create a GitHub repo, and push
-- Import all existing Claude Code sessions from `~/.claude/projects/` into the DB
-- Write a README.md covering quick start, import usage, MCP tools, schema, and configuration
