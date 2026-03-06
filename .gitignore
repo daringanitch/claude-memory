@@ -1,4 +1,5 @@
 data/
+EXPLAINER_SCRIPT.md
 .claude/
 __pycache__/
 *.pyc
