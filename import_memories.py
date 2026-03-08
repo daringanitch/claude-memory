@@ -24,6 +24,7 @@ Usage:
 
 import argparse
 import json
+import logging
 import os
 import sys
 from datetime import datetime
@@ -35,12 +36,19 @@ import psycopg2.extras
 from pgvector.psycopg2 import register_vector
 from sentence_transformers import SentenceTransformer
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%S",
+)
+log = logging.getLogger("import")
+
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://claude:memory_pass@localhost:5432/memory")
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 
-print("Loading embedding model...")
+log.info("Loading embedding model...")
 embedder = SentenceTransformer("all-mpnet-base-v2")
-print("Ready.\n")
+log.info("Ready.")
 
 
 def get_db():
@@ -104,7 +112,7 @@ def record_session(conn, session_id, project, message_count):
 
 def import_claude_code(project_filter=None, min_length=50):
     if not CLAUDE_PROJECTS_DIR.exists():
-        print("~/.claude/projects not found, skipping.")
+        log.warning("~/.claude/projects not found, skipping.")
         return
 
     projects = sorted(CLAUDE_PROJECTS_DIR.iterdir())
@@ -122,13 +130,13 @@ def import_claude_code(project_filter=None, min_length=50):
         home_encoded = str(Path.home()).replace("/", "-")  # e.g. "-Users-yourname"
         project_name = project_dir.name.replace(home_encoded, "").lstrip("-").replace("-", "/")
         project_short = project_name.split("/")[-1]
-        print(f"  Project: {project_name} ({len(jsonl_files)} session(s))")
+        log.info("Project: %s (%d session(s))", project_name, len(jsonl_files))
 
         for jsonl_path in jsonl_files:
             session_id = jsonl_path.stem
 
             if is_session_already_processed(conn, session_id):
-                print(f"    Skipping {session_id[:8]} (already distilled)")
+                log.info("  Skipping %s (already distilled)", session_id[:8])
                 continue
 
             messages = []
@@ -140,7 +148,8 @@ def import_claude_code(project_filter=None, min_length=50):
                         continue
                     try:
                         record = json.loads(line)
-                    except json.JSONDecodeError:
+                    except json.JSONDecodeError as e:
+                        log.debug("  Skipping malformed JSON line in %s: %s", jsonl_path.name, e)
                         continue
 
                     if record.get("type") not in ("user", "assistant"):
@@ -177,12 +186,16 @@ def import_claude_code(project_filter=None, min_length=50):
                         total += 1
                 conn.commit()
                 record_session(conn, session_id, project_short, len(messages))
+                log.info("  Imported session %s (%d messages)", session_id[:8], len(messages))
+            except psycopg2.Error as e:
+                conn.rollback()
+                log.error("  DB error in %s: %s", jsonl_path.name, e)
             except Exception as e:
                 conn.rollback()
-                print(f"    Error in {jsonl_path.name}: {e}")
+                log.error("  Unexpected error in %s: %s", jsonl_path.name, e)
 
     conn.close()
-    print(f"\n  Imported {total} messages from Claude Code sessions.\n")
+    log.info("Imported %d messages from Claude Code sessions.", total)
 
 
 # ── Claude.ai export ──────────────────────────────────────────────────────────
@@ -194,7 +207,7 @@ def import_claude_ai(export_path, min_length=50):
     """
     path = Path(export_path)
     if not path.exists():
-        print(f"File not found: {export_path}")
+        log.error("File not found: %s", export_path)
         return
 
     with open(path, encoding="utf-8") as f:
@@ -241,12 +254,15 @@ def import_claude_ai(export_path, min_length=50):
                     total += 1
 
             conn.commit()
+        except psycopg2.Error as e:
+            conn.rollback()
+            log.error("DB error in conversation '%s': %s", convo_name, e)
         except Exception as e:
             conn.rollback()
-            print(f"  Error in conversation '{convo_name}': {e}")
+            log.error("Unexpected error in conversation '%s': %s", convo_name, e)
 
     conn.close()
-    print(f"Imported {total} messages from Claude.ai export.\n")
+    log.info("Imported %d messages from Claude.ai export.", total)
 
 
 # ── Plain text / markdown ─────────────────────────────────────────────────────
@@ -259,7 +275,7 @@ def import_text_files(paths, chunk_size=1500, overlap=200):
     for file_path in paths:
         path = Path(file_path)
         if not path.exists():
-            print(f"  File not found: {file_path}")
+            log.warning("File not found: %s", file_path)
             continue
 
         text = path.read_text(encoding="utf-8", errors="ignore")
@@ -281,13 +297,16 @@ def import_text_files(paths, chunk_size=1500, overlap=200):
                     insert_memory(cur, chunk, tags, f"file:{path.name}", "", None)
                     total += 1
             conn.commit()
-            print(f"  {path.name}: {len(chunks)} chunk(s)")
+            log.info("%s: %d chunk(s) imported", path.name, len(chunks))
+        except psycopg2.Error as e:
+            conn.rollback()
+            log.error("DB error in %s: %s", file_path, e)
         except Exception as e:
             conn.rollback()
-            print(f"  Error in {file_path}: {e}")
+            log.error("Unexpected error in %s: %s", file_path, e)
 
     conn.close()
-    print(f"\nImported {total} chunks from text files.\n")
+    log.info("Imported %d chunks from text files.", total)
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -306,18 +325,18 @@ def main():
         sys.exit(1)
 
     if args.claude_code:
-        print("=== Importing Claude Code sessions ===")
+        log.info("=== Importing Claude Code sessions ===")
         import_claude_code(project_filter=args.project, min_length=args.min_length)
 
     if args.claude_ai:
-        print("=== Importing Claude.ai export ===")
+        log.info("=== Importing Claude.ai export ===")
         import_claude_ai(args.claude_ai, min_length=args.min_length)
 
     if args.text:
-        print("=== Importing text files ===")
+        log.info("=== Importing text files ===")
         import_text_files(args.text)
 
-    print("Done.")
+    log.info("Done.")
 
 
 if __name__ == "__main__":

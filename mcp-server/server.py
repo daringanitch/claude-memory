@@ -1,18 +1,26 @@
-import os, json
+import os, json, logging
 from contextlib import contextmanager
+from datetime import datetime, timezone
 
 import psycopg2, psycopg2.extras, psycopg2.pool
 from pgvector.psycopg2 import register_vector
 from sentence_transformers import SentenceTransformer
 from mcp.server.fastmcp import FastMCP
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%S",
+)
+log = logging.getLogger("claude-memory")
+
 mcp = FastMCP("claude-memory", host="0.0.0.0", port=3333)
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://claude:memory_pass@localhost:5432/memory")
-print("⏳ Loading embedding model...")
+log.info("Loading embedding model...")
 embedder = SentenceTransformer("all-mpnet-base-v2")
-print("⏳ Connecting to database...")
+log.info("Connecting to database...")
 _pool = psycopg2.pool.ThreadedConnectionPool(1, 5, DATABASE_URL)
-print("✅ Ready.")
+log.info("Ready.")
 
 
 @contextmanager
@@ -28,6 +36,16 @@ def db_conn():
 
 def embed(text):
     return embedder.encode(text, normalize_embeddings=True)
+
+
+def _parse_dt(value: str, name: str):
+    """Parse an ISO date/datetime string. Returns (datetime, None) or (None, error_str)."""
+    if not value:
+        return None, None
+    try:
+        return datetime.fromisoformat(value), None
+    except ValueError:
+        return None, f"❌ Invalid {name} date '{value}'. Use ISO format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS"
 
 
 @mcp.tool()
@@ -53,67 +71,105 @@ def save_memory(content: str, tags: list[str] = [], source: str = "claude-code",
                 )
                 row = cur.fetchone()
             conn.commit()
+        log.info("Memory saved id=%s project=%s", row['id'], project or "(none)")
         return f"✅ Memory saved (ID: {row['id']}, created: {row['created_at']})"
     except Exception as e:
+        log.error("save_memory failed: %s", e)
         return f"❌ Error: {e}"
 
 
 @mcp.tool()
-def semantic_search(query: str, limit: int = 10, min_similarity: float = 0.3, project: str = None) -> str:
-    """Search memories by MEANING using vector similarity. Optionally filter by project."""
+def semantic_search(query: str, limit: int = 10, min_similarity: float = 0.3,
+                    project: str = None, since: str = None, before: str = None) -> str:
+    """Search memories by MEANING using vector similarity. Filter by project, since, or before (ISO dates)."""
+    since_dt, err = _parse_dt(since, "since")
+    if err:
+        return err
+    before_dt, err = _parse_dt(before, "before")
+    if err:
+        return err
+
     vector = embed(query)
     try:
         with db_conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                # Build WHERE dynamically; first two placeholders belong to the SELECT and WHERE cosine checks
+                conditions = ["embedding IS NOT NULL", "(1 - (embedding <=> %s)) >= %s"]
+                cond_params = [vector, min_similarity]
                 if project:
-                    cur.execute(
-                        "SELECT id, content, tags, source, project, created_at, ROUND((1 - (embedding <=> %s))::numeric, 4) AS similarity "
-                        "FROM memories WHERE embedding IS NOT NULL AND (1 - (embedding <=> %s)) >= %s AND project = %s "
-                        "ORDER BY embedding <=> %s LIMIT %s",
-                        (vector, vector, min_similarity, project, vector, limit)
-                    )
-                else:
-                    cur.execute(
-                        "SELECT id, content, tags, source, project, created_at, ROUND((1 - (embedding <=> %s))::numeric, 4) AS similarity "
-                        "FROM memories WHERE embedding IS NOT NULL AND (1 - (embedding <=> %s)) >= %s "
-                        "ORDER BY embedding <=> %s LIMIT %s",
-                        (vector, vector, min_similarity, vector, limit)
-                    )
+                    conditions.append("project = %s")
+                    cond_params.append(project)
+                if since_dt:
+                    conditions.append("created_at >= %s")
+                    cond_params.append(since_dt)
+                if before_dt:
+                    conditions.append("created_at < %s")
+                    cond_params.append(before_dt)
+
+                sql = (
+                    "SELECT id, content, tags, source, project, created_at, "
+                    "ROUND((1 - (embedding <=> %s))::numeric, 4) AS similarity "
+                    f"FROM memories WHERE {' AND '.join(conditions)} "
+                    "ORDER BY embedding <=> %s LIMIT %s"
+                )
+                params = [vector] + cond_params + [vector, limit]
+                cur.execute(sql, params)
                 rows = cur.fetchall()
         return json.dumps([dict(r) for r in rows], indent=2, default=str) if rows else f"No similar memories found for: '{query}'"
     except Exception as e:
+        log.error("semantic_search failed: %s", e)
         return f"❌ Error: {e}"
 
 
 @mcp.tool()
-def search_memories(query: str, limit: int = 10, project: str = None) -> str:
-    """Search memories by exact keyword or phrase. Optionally filter by project."""
+def search_memories(query: str, limit: int = 10, project: str = None,
+                    since: str = None, before: str = None) -> str:
+    """Search memories by exact keyword or phrase. Filter by project, since, or before (ISO dates)."""
+    since_dt, err = _parse_dt(since, "since")
+    if err:
+        return err
+    before_dt, err = _parse_dt(before, "before")
+    if err:
+        return err
+
     try:
         with db_conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                conditions = ["(to_tsvector('english', content) @@ plainto_tsquery('english', %s) OR content ILIKE %s)"]
+                params = [query, f"%{query}%"]
                 if project:
-                    cur.execute(
-                        "SELECT id, content, tags, source, project, created_at FROM memories "
-                        "WHERE (to_tsvector('english', content) @@ plainto_tsquery('english', %s) OR content ILIKE %s) AND project = %s "
-                        "ORDER BY created_at DESC LIMIT %s",
-                        (query, f"%{query}%", project, limit)
-                    )
-                else:
-                    cur.execute(
-                        "SELECT id, content, tags, source, project, created_at FROM memories "
-                        "WHERE to_tsvector('english', content) @@ plainto_tsquery('english', %s) OR content ILIKE %s "
-                        "ORDER BY created_at DESC LIMIT %s",
-                        (query, f"%{query}%", limit)
-                    )
+                    conditions.append("project = %s")
+                    params.append(project)
+                if since_dt:
+                    conditions.append("created_at >= %s")
+                    params.append(since_dt)
+                if before_dt:
+                    conditions.append("created_at < %s")
+                    params.append(before_dt)
+                params.append(limit)
+                sql = (
+                    "SELECT id, content, tags, source, project, created_at FROM memories "
+                    f"WHERE {' AND '.join(conditions)} ORDER BY created_at DESC LIMIT %s"
+                )
+                cur.execute(sql, params)
                 rows = cur.fetchall()
         return json.dumps([dict(r) for r in rows], indent=2, default=str) if rows else f"No memories found for: '{query}'"
     except Exception as e:
+        log.error("search_memories failed: %s", e)
         return f"❌ Error: {e}"
 
 
 @mcp.tool()
-def list_memories(limit: int = 20, tag: str = None, project: str = None) -> str:
-    """List recent memories, optionally filtered by tag and/or project."""
+def list_memories(limit: int = 20, tag: str = None, project: str = None,
+                  since: str = None, before: str = None) -> str:
+    """List recent memories, optionally filtered by tag, project, and/or date range (ISO dates)."""
+    since_dt, err = _parse_dt(since, "since")
+    if err:
+        return err
+    before_dt, err = _parse_dt(before, "before")
+    if err:
+        return err
+
     try:
         with db_conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -125,12 +181,22 @@ def list_memories(limit: int = 20, tag: str = None, project: str = None) -> str:
                 if project:
                     conditions.append("project = %s")
                     params.append(project)
+                if since_dt:
+                    conditions.append("created_at >= %s")
+                    params.append(since_dt)
+                if before_dt:
+                    conditions.append("created_at < %s")
+                    params.append(before_dt)
                 where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
                 params.append(limit)
-                cur.execute(f"SELECT id, content, tags, source, project, created_at FROM memories {where} ORDER BY created_at DESC LIMIT %s", params)
+                cur.execute(
+                    f"SELECT id, content, tags, source, project, created_at FROM memories {where} ORDER BY created_at DESC LIMIT %s",
+                    params
+                )
                 rows = cur.fetchall()
         return json.dumps([dict(r) for r in rows], indent=2, default=str) if rows else "No memories stored yet."
     except Exception as e:
+        log.error("list_memories failed: %s", e)
         return f"❌ Error: {e}"
 
 
@@ -147,6 +213,7 @@ def get_memory(memory_id: int) -> str:
                 row = cur.fetchone()
         return json.dumps(dict(row), indent=2, default=str) if row else f"❌ No memory with ID {memory_id}"
     except Exception as e:
+        log.error("get_memory id=%s failed: %s", memory_id, e)
         return f"❌ Error: {e}"
 
 
@@ -173,6 +240,7 @@ def recent_context(project: str = None, limit: int = 10) -> str:
                 rows = cur.fetchall()
         return json.dumps([dict(r) for r in rows], indent=2, default=str) if rows else "No distilled memories yet. Run distill_sessions.py to generate them."
     except Exception as e:
+        log.error("recent_context failed: %s", e)
         return f"❌ Error: {e}"
 
 
@@ -192,8 +260,10 @@ def update_memory(memory_id: int, content: str = None, tags: list[str] = None) -
                     cur.execute("UPDATE memories SET tags=%s WHERE id=%s", (tags, memory_id))
                 updated = cur.rowcount
             conn.commit()
+        log.info("Memory updated id=%s", memory_id)
         return f"✅ Memory {memory_id} updated." if updated else f"❌ No memory with ID {memory_id}"
     except Exception as e:
+        log.error("update_memory id=%s failed: %s", memory_id, e)
         return f"❌ Error: {e}"
 
 
@@ -206,8 +276,10 @@ def delete_memory(memory_id: int) -> str:
                 cur.execute("DELETE FROM memories WHERE id=%s", (memory_id,))
                 deleted = cur.rowcount
             conn.commit()
+        log.info("Memory deleted id=%s", memory_id)
         return f"✅ Memory {memory_id} deleted." if deleted else f"❌ No memory with ID {memory_id}"
     except Exception as e:
+        log.error("delete_memory id=%s failed: %s", memory_id, e)
         return f"❌ Error: {e}"
 
 
@@ -221,6 +293,7 @@ def list_tags() -> str:
                 rows = cur.fetchall()
         return json.dumps([{"tag": r[0], "count": r[1]} for r in rows], indent=2) if rows else "No tags found."
     except Exception as e:
+        log.error("list_tags failed: %s", e)
         return f"❌ Error: {e}"
 
 
@@ -251,6 +324,74 @@ def get_stats() -> str:
             }
         }, indent=2)
     except Exception as e:
+        log.error("get_stats failed: %s", e)
+        return f"❌ Error: {e}"
+
+
+@mcp.tool()
+def export_memories(project: str = None, tag: str = None, since: str = None,
+                    before: str = None, output_format: str = "json") -> str:
+    """Export memories as JSON or markdown. Filter by project, tag, and/or date range (ISO dates).
+    output_format: 'json' (default) or 'markdown'."""
+    since_dt, err = _parse_dt(since, "since")
+    if err:
+        return err
+    before_dt, err = _parse_dt(before, "before")
+    if err:
+        return err
+    if output_format not in ("json", "markdown"):
+        return "❌ output_format must be 'json' or 'markdown'"
+
+    try:
+        with db_conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                conditions = []
+                params = []
+                if tag:
+                    conditions.append("%s = ANY(tags)")
+                    params.append(tag)
+                if project:
+                    conditions.append("project = %s")
+                    params.append(project)
+                if since_dt:
+                    conditions.append("created_at >= %s")
+                    params.append(since_dt)
+                if before_dt:
+                    conditions.append("created_at < %s")
+                    params.append(before_dt)
+                where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+                cur.execute(
+                    f"SELECT id, content, tags, source, project, created_at, updated_at FROM memories {where} ORDER BY created_at ASC",
+                    params
+                )
+                rows = cur.fetchall()
+
+        if not rows:
+            return "No memories found matching the given filters."
+
+        records = [dict(r) for r in rows]
+        log.info("Exporting %d memories format=%s", len(records), output_format)
+
+        now = datetime.now(timezone.utc)
+        if output_format == "json":
+            return json.dumps({"exported_at": now.isoformat(), "count": len(records), "memories": records}, indent=2, default=str)
+
+        # Markdown format
+        lines = [f"# Memory Export", f"*Exported: {now.strftime('%Y-%m-%d %H:%M UTC')} — {len(records)} memories*", ""]
+        for r in records:
+            lines.append(f"## [{r['id']}] {r['created_at']}")
+            if r.get("project"):
+                lines.append(f"**Project:** {r['project']}  **Source:** {r['source']}")
+            lines.append(f"**Tags:** {', '.join(r['tags']) if r['tags'] else '(none)'}")
+            lines.append("")
+            lines.append(r["content"])
+            lines.append("")
+            lines.append("---")
+            lines.append("")
+        return "\n".join(lines)
+
+    except Exception as e:
+        log.error("export_memories failed: %s", e)
         return f"❌ Error: {e}"
 
 

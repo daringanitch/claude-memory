@@ -14,6 +14,7 @@ Usage:
 
 import argparse
 import json
+import logging
 import os
 import sys
 from pathlib import Path
@@ -24,6 +25,13 @@ import psycopg2
 import psycopg2.extras
 from pgvector.psycopg2 import register_vector
 from sentence_transformers import SentenceTransformer
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%S",
+)
+log = logging.getLogger("distill")
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://claude:memory_pass@localhost:5432/memory")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -138,7 +146,7 @@ def distill_session(conn, embedder, client, session, dry_run=False):
 
     raw_messages = get_raw_messages(conn, session_prefix)
     if not raw_messages:
-        print(f"    No raw messages found for {session_prefix} — marking distilled")
+        log.info("  No raw messages for %s — marking distilled", session_prefix)
         if not dry_run:
             with conn.cursor() as cur:
                 cur.execute("UPDATE imported_sessions SET distilled = TRUE WHERE session_id = %s", (session_id,))
@@ -146,24 +154,27 @@ def distill_session(conn, embedder, client, session, dry_run=False):
         return 0
 
     transcript = build_transcript(raw_messages)
-    print(f"    Calling Claude haiku ({len(transcript):,} chars, {len(raw_messages)} messages)...")
+    log.info("  Calling Claude haiku (%d chars, %d messages)...", len(transcript), len(raw_messages))
 
     try:
         response = call_claude(client, project, session_prefix, transcript)
         memories = parse_distilled(response)
     except json.JSONDecodeError as e:
-        print(f"    ❌ JSON parse error: {e} — keeping raws")
+        log.error("  JSON parse error for %s: %s — keeping raws", session_prefix, e)
+        return 0
+    except anthropic.APIError as e:
+        log.error("  Anthropic API error for %s: %s — keeping raws", session_prefix, e)
         return 0
     except Exception as e:
-        print(f"    ❌ API error: {e} — keeping raws")
+        log.error("  Unexpected error for %s: %s — keeping raws", session_prefix, e)
         return 0
 
-    print(f"    → {len(memories)} distilled memories extracted")
+    log.info("  → %d distilled memories extracted", len(memories))
 
     if dry_run:
         for i, m in enumerate(memories, 1):
-            print(f"       [{i}] {m['content'][:100]}")
-            print(f"           tags: {m.get('tags', [])}")
+            log.info("    [%d] %s", i, m['content'][:100])
+            log.info("        tags: %s", m.get('tags', []))
         return len(memories)
 
     if not memories:
@@ -192,10 +203,15 @@ def distill_session(conn, embedder, client, session, dry_run=False):
             # Mark distilled
             cur.execute("UPDATE imported_sessions SET distilled = TRUE WHERE session_id = %s", (session_id,))
         conn.commit()
+        log.info("  Session %s distilled: %d memories stored", session_prefix, len(memories))
         return len(memories)
+    except psycopg2.Error as e:
+        conn.rollback()
+        log.error("  DB error for %s: %s — keeping raws", session_prefix, e)
+        return 0
     except Exception as e:
         conn.rollback()
-        print(f"    ❌ DB error: {e} — keeping raws")
+        log.error("  Unexpected DB error for %s: %s — keeping raws", session_prefix, e)
         return 0
 
 
@@ -206,35 +222,35 @@ def main():
     args = parser.parse_args()
 
     if not ANTHROPIC_API_KEY:
-        print("❌ ANTHROPIC_API_KEY not set. Export it or add it to ~/.claude/.env")
+        log.error("ANTHROPIC_API_KEY not set. Export it or add it to ~/.claude/.env")
         sys.exit(1)
 
-    print("Loading embedding model...")
+    log.info("Loading embedding model...")
     embedder = SentenceTransformer("all-mpnet-base-v2")
-    print("Ready.\n")
+    log.info("Ready.")
 
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     conn = get_db()
 
     sessions = get_pending_sessions(conn, args.project)
     if not sessions:
-        print("No pending sessions to distill.")
+        log.info("No pending sessions to distill.")
         conn.close()
         return
 
     mode = "[DRY RUN] " if args.dry_run else ""
-    print(f"{mode}=== Distilling {len(sessions)} session(s) ===\n")
+    log.info("%s=== Distilling %d session(s) ===", mode, len(sessions))
 
     total_distilled = 0
     for session in sessions:
         project = session["project"] or "unknown"
         session_prefix = session["session_id"][:8]
-        print(f"  Session {session_prefix} (project: {project}, {session['message_count']} messages)")
+        log.info("Session %s (project: %s, %d messages)", session_prefix, project, session['message_count'])
         count = distill_session(conn, embedder, client, session, dry_run=args.dry_run)
         total_distilled += count
 
     conn.close()
-    print(f"\n{'[DRY RUN] ' if args.dry_run else ''}Done. {total_distilled} distilled memories {'would be ' if args.dry_run else ''}stored.")
+    log.info("%sDone. %d distilled memories %sstored.", mode, total_distilled, "would be " if args.dry_run else "")
 
 
 if __name__ == "__main__":
