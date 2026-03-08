@@ -119,7 +119,8 @@ def import_claude_code(project_filter=None, min_length=50):
         if not jsonl_files:
             continue
 
-        project_name = project_dir.name.replace("-Users-daringanitch-", "").replace("-", "/")
+        home_encoded = str(Path.home()).replace("/", "-")  # e.g. "-Users-yourname"
+        project_name = project_dir.name.replace(home_encoded, "").lstrip("-").replace("-", "/")
         project_short = project_name.split("/")[-1]
         print(f"  Project: {project_name} ({len(jsonl_files)} session(s))")
 
