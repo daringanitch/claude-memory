@@ -26,11 +26,16 @@ log.info("Ready.")
 @contextmanager
 def db_conn():
     conn = _pool.getconn()
-    register_vector(conn)
-    conn.autocommit = False
     try:
+        # Rollback any leftover transaction from previous pool use,
+        # then register the vector type (runs a SELECT).
+        # autocommit=False is the psycopg2 default — don't set it explicitly
+        # while a transaction may already be open (causes set_session error).
+        conn.rollback()
+        register_vector(conn)
         yield conn
     finally:
+        conn.rollback()  # ensure clean state before returning to pool
         _pool.putconn(conn)
 
 
