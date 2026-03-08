@@ -5,15 +5,25 @@ CREATE TABLE memories (
   content     TEXT         NOT NULL,
   tags        TEXT[]       DEFAULT '{}',
   source      VARCHAR(100) DEFAULT 'claude-code',
-  embedding   vector(384),
+  project     VARCHAR(100) DEFAULT '',
+  embedding   vector(768),
   created_at  TIMESTAMP    DEFAULT NOW(),
   updated_at  TIMESTAMP    DEFAULT NOW()
 );
 
 CREATE INDEX idx_memories_tags      ON memories USING GIN(tags);
 CREATE INDEX idx_memories_created   ON memories(created_at DESC);
+CREATE INDEX idx_memories_project   ON memories(project);
 CREATE INDEX idx_memories_fts       ON memories USING GIN(to_tsvector('english', content));
 CREATE INDEX idx_memories_embedding ON memories USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+
+CREATE TABLE imported_sessions (
+  session_id    VARCHAR(100) PRIMARY KEY,
+  project       VARCHAR(100) DEFAULT '',
+  imported_at   TIMESTAMP    DEFAULT NOW(),
+  message_count INT          DEFAULT 0,
+  distilled     BOOLEAN      DEFAULT FALSE
+);
 
 CREATE OR REPLACE FUNCTION update_updated_at()
 RETURNS TRIGGER AS $$
