@@ -10,8 +10,8 @@ Persistent vector memory MCP server for Claude Code. Stores and semantically sea
 
 Two services, orchestrated by Docker Compose:
 
-- **PostgreSQL 16 + pgvector** (port 5432): Stores memories with 384-dimensional embeddings. Schema initialized by `init.sql`.
-- **FastMCP server** (port 3333): `mcp-server/server.py` exposes 7 MCP tools over SSE. Uses `all-MiniLM-L6-v2` from sentence-transformers to generate embeddings.
+- **PostgreSQL 16 + pgvector** (port 5432): Stores memories with 768-dimensional embeddings. Schema initialized by `init.sql`.
+- **FastMCP server** (port 3333): `mcp-server/server.py` exposes 10 MCP tools over SSE. Uses `all-mpnet-base-v2` from sentence-transformers to generate embeddings. A `ThreadedConnectionPool` keeps 1–5 persistent DB connections.
 
 The `memories` table has GIN indexes on tags and full-text search, an IVFFlat index for cosine similarity vector search, and an auto-updating `updated_at` trigger.
 
@@ -65,13 +65,16 @@ The script reads `DATABASE_URL` from environment (default: `postgresql://claude:
 
 | Tool | Key Parameters | Purpose |
 |------|---------------|---------|
-| `save_memory` | `content`, `tags[]`, `source` | Store a memory with auto-embedding |
-| `semantic_search` | `query`, `limit`, `min_similarity` | Vector similarity search |
-| `search_memories` | `query`, `limit` | Full-text keyword search |
-| `list_memories` | `limit`, `tag` | List recent memories, optionally by tag |
+| `save_memory` | `content`, `tags[]`, `source`, `project` | Store a memory with auto-embedding; dedup at ≥0.92 cosine similarity |
+| `semantic_search` | `query`, `limit`, `min_similarity`, `project` | Vector similarity search |
+| `search_memories` | `query`, `limit`, `project` | Full-text keyword search |
+| `list_memories` | `limit`, `tag`, `project` | List recent memories, optionally filtered |
+| `get_memory` | `memory_id` | Fetch a single memory by ID with full content |
+| `recent_context` | `project`, `limit` | Recent distilled memories — use at session start for context recall |
 | `update_memory` | `memory_id`, `content`, `tags[]` | Update and re-embed a memory |
 | `delete_memory` | `memory_id` | Delete by ID |
 | `list_tags` | — | All unique tags with counts |
+| `get_stats` | — | Memory counts by project/source, session import status |
 
 ## Configuration
 

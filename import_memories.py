@@ -17,6 +17,9 @@ Usage:
 
   # All sources at once
   python import_memories.py --claude-code --claude-ai conversations.json --text notes.md
+
+  # Custom minimum message length (default: 50 chars)
+  python import_memories.py --claude-code --min-length 100
 """
 
 import argparse
@@ -36,7 +39,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://claude:memory_pass@l
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 
 print("Loading embedding model...")
-embedder = SentenceTransformer("all-MiniLM-L6-v2")
+embedder = SentenceTransformer("all-mpnet-base-v2")
 print("Ready.\n")
 
 
@@ -51,17 +54,17 @@ def embed(text):
     return embedder.encode(text, normalize_embeddings=True)
 
 
-def insert_memory(cur, content, tags, source, created_at=None):
+def insert_memory(cur, content, tags, source, project="", created_at=None):
     vector = embed(content)
     if created_at:
         cur.execute(
-            "INSERT INTO memories (content, tags, source, embedding, created_at) VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
-            (content, tags, source, vector, created_at),
+            "INSERT INTO memories (content, tags, source, project, embedding, created_at) VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
+            (content, tags, source, project, vector, created_at),
         )
     else:
         cur.execute(
-            "INSERT INTO memories (content, tags, source, embedding) VALUES (%s, %s, %s, %s)",
-            (content, tags, source, vector),
+            "INSERT INTO memories (content, tags, source, project, embedding) VALUES (%s, %s, %s, %s, %s)",
+            (content, tags, source, project, vector),
         )
 
 
@@ -78,6 +81,25 @@ def extract_text(content):
                 parts.append(block["text"])
         return "\n".join(parts).strip()
     return ""
+
+
+def is_session_already_processed(conn, session_id):
+    """Return True if session is in imported_sessions with distilled=TRUE (skip entirely) or imported."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT distilled FROM imported_sessions WHERE session_id = %s", (session_id,))
+        row = cur.fetchone()
+    if row is None:
+        return False  # never imported
+    return row[0]  # True if distilled, False if imported but not yet distilled
+
+
+def record_session(conn, session_id, project, message_count):
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO imported_sessions (session_id, project, message_count) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
+            (session_id, project, message_count)
+        )
+    conn.commit()
 
 
 def import_claude_code(project_filter=None, min_length=50):
@@ -98,10 +120,16 @@ def import_claude_code(project_filter=None, min_length=50):
             continue
 
         project_name = project_dir.name.replace("-Users-daringanitch-", "").replace("-", "/")
+        project_short = project_name.split("/")[-1]
         print(f"  Project: {project_name} ({len(jsonl_files)} session(s))")
 
         for jsonl_path in jsonl_files:
             session_id = jsonl_path.stem
+
+            if is_session_already_processed(conn, session_id):
+                print(f"    Skipping {session_id[:8]} (already distilled)")
+                continue
+
             messages = []
 
             with open(jsonl_path, encoding="utf-8", errors="ignore") as f:
@@ -139,15 +167,15 @@ def import_claude_code(project_filter=None, min_length=50):
             if not messages:
                 continue
 
-            # Store as individual messages (preserves searchability)
             try:
                 with conn.cursor() as cur:
                     for role, text, created_at in messages:
-                        tags = ["claude-code-session", f"role:{role}", f"project:{project_name.split('/')[-1]}"]
+                        tags = ["claude-code-session", f"role:{role}", f"project:{project_short}"]
                         source = f"claude-code/{session_id[:8]}"
-                        insert_memory(cur, text, tags, source, created_at)
+                        insert_memory(cur, text, tags, source, project_short, created_at)
                         total += 1
                 conn.commit()
+                record_session(conn, session_id, project_short, len(messages))
             except Exception as e:
                 conn.rollback()
                 print(f"    Error in {jsonl_path.name}: {e}")
@@ -171,7 +199,6 @@ def import_claude_ai(export_path, min_length=50):
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
 
-    # Handle both a list of conversations or a dict with a key
     if isinstance(data, dict):
         conversations = data.get("conversations", data.get("chats", [data]))
     else:
@@ -188,7 +215,6 @@ def import_claude_ai(export_path, min_length=50):
             with conn.cursor() as cur:
                 for msg in messages:
                     role = msg.get("sender", msg.get("role", ""))
-                    # Extract text from content blocks or plain string
                     content_raw = msg.get("content", msg.get("text", ""))
                     if isinstance(content_raw, list):
                         text = "\n".join(
@@ -210,7 +236,7 @@ def import_claude_ai(export_path, min_length=50):
                             pass
 
                     tags = ["claude-ai", f"role:{role}", f"convo:{convo_name[:40]}"]
-                    insert_memory(cur, text, tags, f"claude.ai/{convo_name[:30]}", created_at)
+                    insert_memory(cur, text, tags, f"claude.ai/{convo_name[:30]}", "", created_at)
                     total += 1
 
             conn.commit()
@@ -225,9 +251,7 @@ def import_claude_ai(export_path, min_length=50):
 # ── Plain text / markdown ─────────────────────────────────────────────────────
 
 def import_text_files(paths, chunk_size=1500, overlap=200):
-    """
-    Split text files into overlapping chunks and store each as a memory.
-    """
+    """Split text files into overlapping chunks and store each as a memory."""
     conn = get_db()
     total = 0
 
@@ -241,7 +265,6 @@ def import_text_files(paths, chunk_size=1500, overlap=200):
         ext = path.suffix.lstrip(".")
         tags = ["text-import", f"file:{path.name}", f"type:{ext or 'txt'}"]
 
-        # Chunk the text with overlap
         chunks = []
         start = 0
         while start < len(text):
@@ -254,7 +277,7 @@ def import_text_files(paths, chunk_size=1500, overlap=200):
                 for i, chunk in enumerate(chunks):
                     if len(chunk) < 50:
                         continue
-                    insert_memory(cur, chunk, tags, f"file:{path.name}", None)
+                    insert_memory(cur, chunk, tags, f"file:{path.name}", "", None)
                     total += 1
             conn.commit()
             print(f"  {path.name}: {len(chunks)} chunk(s)")
