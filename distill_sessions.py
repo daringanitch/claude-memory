@@ -20,7 +20,6 @@ import sys
 from pathlib import Path
 
 import anthropic
-import numpy as np
 import psycopg2
 import psycopg2.extras
 from pgvector.psycopg2 import register_vector

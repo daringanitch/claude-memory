@@ -4,7 +4,6 @@ import os
 import json
 from datetime import datetime
 from unittest.mock import MagicMock, patch, call
-import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "mcp-server"))
 
