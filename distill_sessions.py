@@ -1,27 +1,26 @@
 #!/usr/bin/env python3
 """
 Distill raw Claude Code session messages into durable knowledge memories.
-
-Reads sessions from imported_sessions where distilled=FALSE, sends transcripts
-to Claude haiku, extracts key facts/decisions/patterns, stores as clean memories,
-then deletes the raw messages and marks the session as distilled.
+Uses a local Ollama LLM — no API key required.
 
 Usage:
-  python distill_sessions.py               # distill all pending sessions
-  python distill_sessions.py --project osint  # filter by project
-  python distill_sessions.py --dry-run     # preview without writing
+  python distill_sessions.py                      # distill all pending sessions
+  python distill_sessions.py --project osint      # filter by project
+  python distill_sessions.py --dry-run            # preview without writing
+  python distill_sessions.py --workers 4          # parallel sessions (default: 4)
+  python distill_sessions.py --model llama3.2:3b  # model override
 """
 
 import argparse
 import json
 import logging
 import os
-import sys
-from pathlib import Path
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import anthropic
 import psycopg2
 import psycopg2.extras
+from openai import OpenAI
 from pgvector.psycopg2 import register_vector
 from sentence_transformers import SentenceTransformer
 
@@ -33,9 +32,10 @@ logging.basicConfig(
 log = logging.getLogger("distill")
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://claude:memory_pass@localhost:5432/memory")
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-MODEL = "claude-haiku-4-5-20251001"
-MAX_TRANSCRIPT_CHARS = 80_000  # ~20k tokens, safe for haiku context
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/v1")
+DEFAULT_MODEL = os.environ.get("DISTILL_MODEL", "qwen2.5:7b")
+DEFAULT_WORKERS = int(os.environ.get("DISTILL_WORKERS", "4"))
+MAX_TRANSCRIPT_CHARS = 80_000  # ~20k tokens
 
 DISTILL_PROMPT = """\
 You are extracting durable knowledge from a Claude Code session transcript.
@@ -62,6 +62,8 @@ Session ID: {session_id}
 Transcript:
 {transcript}"""
 
+_embed_lock = threading.Lock()
+
 
 def get_db():
     conn = psycopg2.connect(DATABASE_URL)
@@ -70,8 +72,10 @@ def get_db():
     return conn
 
 
-def embed(text, embedder):
-    return embedder.encode(text, normalize_embeddings=True)
+def embed_batch(texts, embedder):
+    """Batch-embed a list of texts. Thread-safe via lock."""
+    with _embed_lock:
+        return embedder.encode(texts, normalize_embeddings=True, batch_size=64)
 
 
 def get_pending_sessions(conn, project_filter=None):
@@ -91,7 +95,6 @@ def get_pending_sessions(conn, project_filter=None):
 
 
 def get_raw_messages(conn, session_id_prefix):
-    """Fetch all raw memories for a session by source prefix."""
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
             "SELECT id, content FROM memories WHERE source = %s ORDER BY created_at",
@@ -101,36 +104,25 @@ def get_raw_messages(conn, session_id_prefix):
 
 
 def build_transcript(messages):
-    parts = []
-    for msg in messages:
-        content = msg["content"].strip()
-        if content:
-            parts.append(content)
+    parts = [msg["content"].strip() for msg in messages if msg["content"].strip()]
     transcript = "\n\n---\n\n".join(parts)
-    # Truncate if too long
     if len(transcript) > MAX_TRANSCRIPT_CHARS:
         transcript = transcript[:MAX_TRANSCRIPT_CHARS] + "\n\n[transcript truncated]"
     return transcript
 
 
-def call_claude(client, project, session_id, transcript):
-    prompt = DISTILL_PROMPT.format(
-        project=project,
-        session_id=session_id,
-        transcript=transcript
-    )
-    message = client.messages.create(
-        model=MODEL,
+def call_ollama(client, model, project, session_id, transcript):
+    prompt = DISTILL_PROMPT.format(project=project, session_id=session_id, transcript=transcript)
+    response = client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
         max_tokens=4096,
-        messages=[{"role": "user", "content": prompt}]
     )
-    return message.content[0].text
+    return response.choices[0].message.content
 
 
 def parse_distilled(response_text):
-    """Extract JSON array from Claude response."""
     text = response_text.strip()
-    # Find JSON array bounds
     start = text.find("[")
     end = text.rfind("]")
     if start == -1 or end == -1:
@@ -138,118 +130,137 @@ def parse_distilled(response_text):
     return json.loads(text[start:end + 1])
 
 
-def distill_session(conn, embedder, client, session, dry_run=False):
+def distill_session(embedder, client, model, session, dry_run=False):
+    """Process one session. Opens its own DB connection for thread safety."""
     session_id = session["session_id"]
     project = session["project"] or "unknown"
     session_prefix = session_id[:8]
 
-    raw_messages = get_raw_messages(conn, session_prefix)
-    if not raw_messages:
-        log.info("  No raw messages for %s — marking distilled", session_prefix)
-        if not dry_run:
+    conn = get_db()
+    try:
+        raw_messages = get_raw_messages(conn, session_prefix)
+        if not raw_messages:
+            log.info("  [%s] No raw messages — marking distilled", session_prefix)
+            if not dry_run:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE imported_sessions SET distilled = TRUE WHERE session_id = %s",
+                        (session_id,)
+                    )
+                conn.commit()
+            return 0
+
+        transcript = build_transcript(raw_messages)
+        log.info("  [%s] Calling %s (%d chars, %d messages)...",
+                 session_prefix, model, len(transcript), len(raw_messages))
+
+        try:
+            response = call_ollama(client, model, project, session_prefix, transcript)
+            memories = parse_distilled(response)
+        except json.JSONDecodeError as e:
+            log.error("  [%s] JSON parse error: %s — keeping raws", session_prefix, e)
+            return 0
+        except Exception as e:
+            log.error("  [%s] LLM error: %s — keeping raws", session_prefix, e)
+            return 0
+
+        log.info("  [%s] → %d memories extracted", session_prefix, len(memories))
+
+        if dry_run:
+            for i, m in enumerate(memories, 1):
+                log.info("    [%d] %s | tags: %s", i, m["content"][:100], m.get("tags", []))
+            return len(memories)
+
+        if not memories:
             with conn.cursor() as cur:
-                cur.execute("UPDATE imported_sessions SET distilled = TRUE WHERE session_id = %s", (session_id,))
-            conn.commit()
-        return 0
-
-    transcript = build_transcript(raw_messages)
-    log.info("  Calling Claude haiku (%d chars, %d messages)...", len(transcript), len(raw_messages))
-
-    try:
-        response = call_claude(client, project, session_prefix, transcript)
-        memories = parse_distilled(response)
-    except json.JSONDecodeError as e:
-        log.error("  JSON parse error for %s: %s — keeping raws", session_prefix, e)
-        return 0
-    except anthropic.APIError as e:
-        log.error("  Anthropic API error for %s: %s — keeping raws", session_prefix, e)
-        return 0
-    except Exception as e:
-        log.error("  Unexpected error for %s: %s — keeping raws", session_prefix, e)
-        return 0
-
-    log.info("  → %d distilled memories extracted", len(memories))
-
-    if dry_run:
-        for i, m in enumerate(memories, 1):
-            log.info("    [%d] %s", i, m['content'][:100])
-            log.info("        tags: %s", m.get('tags', []))
-        return len(memories)
-
-    if not memories:
-        # Nothing learned — still delete raws and mark done
-        with conn.cursor() as cur:
-            cur.execute("DELETE FROM memories WHERE source = %s", (f"claude-code/{session_prefix}",))
-            cur.execute("UPDATE imported_sessions SET distilled = TRUE WHERE session_id = %s", (session_id,))
-        conn.commit()
-        return 0
-
-    try:
-        with conn.cursor() as cur:
-            for item in memories:
-                content = item.get("content", "").strip()
-                if not content:
-                    continue
-                item_tags = item.get("tags", [])
-                tags = ["distilled", f"project:{project}"] + [t for t in item_tags if t not in ("distilled",)]
-                vector = embed(content, embedder)
+                cur.execute("DELETE FROM memories WHERE source = %s", (f"claude-code/{session_prefix}",))
                 cur.execute(
-                    "INSERT INTO memories (content, tags, source, project, embedding) VALUES (%s, %s, %s, %s, %s)",
-                    (content, tags, f"distilled/{session_prefix}", project, vector)
+                    "UPDATE imported_sessions SET distilled = TRUE WHERE session_id = %s",
+                    (session_id,)
                 )
-            # Delete raw messages for this session
-            cur.execute("DELETE FROM memories WHERE source = %s", (f"claude-code/{session_prefix}",))
-            # Mark distilled
-            cur.execute("UPDATE imported_sessions SET distilled = TRUE WHERE session_id = %s", (session_id,))
-        conn.commit()
-        log.info("  Session %s distilled: %d memories stored", session_prefix, len(memories))
-        return len(memories)
-    except psycopg2.Error as e:
-        conn.rollback()
-        log.error("  DB error for %s: %s — keeping raws", session_prefix, e)
-        return 0
-    except Exception as e:
-        conn.rollback()
-        log.error("  Unexpected DB error for %s: %s — keeping raws", session_prefix, e)
-        return 0
+            conn.commit()
+            return 0
+
+        # Batch embed all contents at once — much faster than one at a time
+        valid = [(m["content"].strip(), m.get("tags", [])) for m in memories if m.get("content", "").strip()]
+        if not valid:
+            return 0
+
+        contents, all_tags = zip(*valid)
+        vectors = embed_batch(list(contents), embedder)
+
+        rows = []
+        for content, item_tags, vector in zip(contents, all_tags, vectors):
+            tags = ["distilled", f"project:{project}"] + [t for t in item_tags if t != "distilled"]
+            rows.append((content, tags, f"distilled/{session_prefix}", project, vector))
+
+        try:
+            with conn.cursor() as cur:
+                psycopg2.extras.execute_values(
+                    cur,
+                    "INSERT INTO memories (content, tags, source, project, embedding) VALUES %s",
+                    rows,
+                )
+                cur.execute("DELETE FROM memories WHERE source = %s", (f"claude-code/{session_prefix}",))
+                cur.execute(
+                    "UPDATE imported_sessions SET distilled = TRUE WHERE session_id = %s",
+                    (session_id,)
+                )
+            conn.commit()
+            log.info("  [%s] Done: %d memories stored", session_prefix, len(rows))
+            return len(rows)
+        except psycopg2.Error as e:
+            conn.rollback()
+            log.error("  [%s] DB error: %s — keeping raws", session_prefix, e)
+            return 0
+    finally:
+        conn.close()
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Distill Claude Code sessions into curated memories")
+    parser = argparse.ArgumentParser(description="Distill Claude Code sessions into curated memories via local LLM")
     parser.add_argument("--project", help="Filter to sessions from this project")
     parser.add_argument("--dry-run", action="store_true", help="Preview extractions without writing to DB")
+    parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS,
+                        help=f"Parallel sessions (default: {DEFAULT_WORKERS})")
+    parser.add_argument("--model", default=DEFAULT_MODEL,
+                        help=f"Ollama model (default: {DEFAULT_MODEL})")
+    parser.add_argument("--ollama-url", default=OLLAMA_URL,
+                        help=f"Ollama base URL (default: {OLLAMA_URL})")
     args = parser.parse_args()
-
-    if not ANTHROPIC_API_KEY:
-        log.error("ANTHROPIC_API_KEY not set. Export it or add it to ~/.claude/.env")
-        sys.exit(1)
 
     log.info("Loading embedding model...")
     embedder = SentenceTransformer("all-mpnet-base-v2")
-    log.info("Ready.")
 
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    client = OpenAI(base_url=args.ollama_url, api_key="ollama")
+
     conn = get_db()
-
     sessions = get_pending_sessions(conn, args.project)
+    conn.close()
+
     if not sessions:
         log.info("No pending sessions to distill.")
-        conn.close()
         return
 
     mode = "[DRY RUN] " if args.dry_run else ""
-    log.info("%s=== Distilling %d session(s) ===", mode, len(sessions))
+    log.info("%s=== Distilling %d session(s) | workers=%d | model=%s ===",
+             mode, len(sessions), args.workers, args.model)
 
-    total_distilled = 0
-    for session in sessions:
-        project = session["project"] or "unknown"
-        session_prefix = session["session_id"][:8]
-        log.info("Session %s (project: %s, %d messages)", session_prefix, project, session['message_count'])
-        count = distill_session(conn, embedder, client, session, dry_run=args.dry_run)
-        total_distilled += count
+    total = 0
+    with ThreadPoolExecutor(max_workers=args.workers) as pool:
+        futures = {
+            pool.submit(distill_session, embedder, client, args.model, s, args.dry_run): s
+            for s in sessions
+        }
+        for future in as_completed(futures):
+            s = futures[future]
+            try:
+                total += future.result()
+            except Exception as e:
+                log.error("Session %s failed: %s", s["session_id"][:8], e)
 
-    conn.close()
-    log.info("%sDone. %d distilled memories %sstored.", mode, total_distilled, "would be " if args.dry_run else "")
+    log.info("%sDone. %d distilled memories %sstored.",
+             mode, total, "would be " if args.dry_run else "")
 
 
 if __name__ == "__main__":

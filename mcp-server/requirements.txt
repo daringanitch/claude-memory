@@ -4,4 +4,4 @@ pgvector
 uvicorn
 sentence-transformers
 numpy
-anthropic
+openai
