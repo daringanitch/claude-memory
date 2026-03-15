@@ -23,9 +23,9 @@ sys.modules.setdefault("psycopg2", mock_psycopg2)
 sys.modules.setdefault("psycopg2.extras", mock_psycopg2.extras)
 sys.modules.setdefault("psycopg2.pool", mock_psycopg2.pool)
 
-# --- anthropic ---
-mock_anthropic = MagicMock()
-sys.modules.setdefault("anthropic", mock_anthropic)
+# --- openai ---
+mock_openai = MagicMock()
+sys.modules.setdefault("openai", mock_openai)
 
 # --- mcp ---
 mock_mcp = MagicMock()
