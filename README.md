@@ -13,9 +13,15 @@ When registered as an MCP server, Claude can search your memory by meaning (`sem
 
 ## Quick start
 
-**Prerequisites:** Docker, [Claude Code](https://claude.ai/code)
+**Prerequisites:** Docker, [Claude Code](https://claude.ai/code), [Ollama](https://ollama.com)
 
 ```bash
+# 1. Install Ollama and pull a model
+brew install ollama
+ollama serve &
+ollama pull qwen2.5:7b   # recommended — or llama3.2:3b for lower RAM
+
+# 2. Clone and start
 git clone https://github.com/daringanitch/claude-memory
 cd claude-memory
 bash quickstart.sh
@@ -24,7 +30,7 @@ bash quickstart.sh
 `quickstart.sh` handles everything in order:
 1. Starts Docker services and waits for the DB to be healthy
 2. Imports your existing `~/.claude/projects` session history
-3. Distills sessions into durable memories (requires `ANTHROPIC_API_KEY` in `~/.claude/.env`)
+3. Distills sessions into durable memories using a local Ollama LLM (no API key required)
 4. Registers the MCP server with Claude Code at user scope (available in every project)
 5. Optionally installs the hourly auto-import LaunchAgent (macOS)
 
@@ -69,16 +75,20 @@ docker compose run --rm -T \
 
 ## Distilling sessions
 
-Raw imported messages are verbose. `distill_sessions.py` uses Claude Haiku to extract durable knowledge — decisions, patterns, bug root causes — and replaces raw messages with concise, searchable memories:
+Raw imported messages are verbose. `distill_sessions.py` uses a local Ollama LLM to extract durable knowledge — decisions, patterns, bug root causes — and replaces raw messages with concise, searchable memories. No API key required.
+
+**Ollama setup (one-time):**
+```bash
+brew install ollama
+ollama serve &
+ollama pull qwen2.5:7b   # ~4.7GB, best quality
+# or: ollama pull llama3.2:3b  (~2GB, faster)
+```
 
 ```bash
-# Set your API key
-export ANTHROPIC_API_KEY=sk-ant-...
-# or add it to ~/.claude/.env
-
-# Distill all pending sessions
+# Distill all pending sessions (4 parallel workers by default)
 docker compose run --rm -T \
-  -e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
+  -e OLLAMA_URL="http://host.docker.internal:11434/v1" \
   -v $(pwd)/distill_sessions.py:/app/distill_sessions.py:ro \
   mcp-server python /app/distill_sessions.py
 
@@ -87,7 +97,12 @@ docker compose run --rm -T \
 
 # Filter to one project
   mcp-server python /app/distill_sessions.py --project my-project
+
+# Tune parallelism or swap models
+  mcp-server python /app/distill_sessions.py --workers 8 --model llama3.2:3b
 ```
+
+Speed notes: sessions are processed in parallel (`--workers`, default 4), embeddings are batched per session, and DB inserts are bulk operations — roughly 4x faster than sequential processing.
 
 ## Auto-import (macOS)
 
@@ -138,7 +153,7 @@ brew install pytest   # one-time
 pytest tests/ -v      # 37 tests, no Docker or GPU required
 ```
 
-All heavy dependencies (sentence-transformers, psycopg2, anthropic) are mocked by `tests/conftest.py`.
+All heavy dependencies (sentence-transformers, psycopg2, openai) are mocked by `tests/conftest.py`.
 
 ## Global Claude Code integration
 
@@ -188,7 +203,9 @@ Indexes: IVFFlat for vector cosine search, GIN for tag arrays and full-text sear
 | `POSTGRES_USER` | `claude` |
 | `POSTGRES_PASSWORD` | `memory_pass` |
 | `DATABASE_URL` | `postgresql://claude:memory_pass@db:5432/memory` |
-| `ANTHROPIC_API_KEY` | _(required for distillation only)_ |
+| `OLLAMA_URL` | `http://localhost:11434/v1` (use `http://host.docker.internal:11434/v1` inside Docker) |
+| `DISTILL_MODEL` | `qwen2.5:7b` |
+| `DISTILL_WORKERS` | `4` |
 
 Data is persisted to `./data/postgres/`. The HuggingFace model cache is stored in a named Docker volume (`model_cache`) so `all-mpnet-base-v2` isn't re-downloaded on restart.
 
@@ -198,4 +215,4 @@ Data is persisted to `./data/postgres/`. The HuggingFace model cache is stored i
 - [FastMCP](https://github.com/jlowin/fastmcp) — MCP server framework
 - [sentence-transformers](https://www.sbert.net/) — `all-mpnet-base-v2` for 768-dim embeddings
 - [Model Context Protocol](https://modelcontextprotocol.io/) — tool interface for Claude
-- [anthropic-sdk](https://github.com/anthropics/anthropic-sdk-python) — Claude Haiku for session distillation
+- [Ollama](https://ollama.com) — local LLM inference for session distillation (Qwen2.5, Llama3.2, etc.)

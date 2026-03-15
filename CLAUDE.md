@@ -12,6 +12,7 @@ Two services, orchestrated by Docker Compose:
 
 - **PostgreSQL 16 + pgvector** (port 5432): Stores memories with 768-dimensional embeddings. Schema initialized by `init.sql`.
 - **FastMCP server** (port 3333): `mcp-server/server.py` exposes 10 MCP tools over SSE. Uses `all-mpnet-base-v2` from sentence-transformers to generate embeddings. A `ThreadedConnectionPool` keeps 1–5 persistent DB connections.
+- **Ollama** (port 11434, runs on host): Local LLM used by `distill_sessions.py` for session distillation. No API key required. Recommended model: `qwen2.5:7b`.
 
 The `memories` table has GIN indexes on tags and full-text search, an IVFFlat index for cosine similarity vector search, and an auto-updating `updated_at` trigger.
 
@@ -84,6 +85,9 @@ The script reads `DATABASE_URL` from environment (default: `postgresql://claude:
 | `POSTGRES_DB` | `memory` | Database name |
 | `POSTGRES_USER` | `claude` | DB user |
 | `POSTGRES_PASSWORD` | `memory_pass` | DB password |
+| `OLLAMA_URL` | `http://localhost:11434/v1` | Ollama endpoint for distillation (use `host.docker.internal` inside Docker) |
+| `DISTILL_MODEL` | `qwen2.5:7b` | Ollama model used by `distill_sessions.py` |
+| `DISTILL_WORKERS` | `4` | Parallel sessions during distillation |
 
 Data is persisted to `./data/postgres/` on the host. The HuggingFace model cache is volume-mounted to survive container restarts.
 
