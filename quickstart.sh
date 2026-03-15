@@ -5,7 +5,7 @@
 # What this does:
 #   1. Starts Docker services (PostgreSQL + MCP server)
 #   2. Imports your existing Claude Code session history
-#   3. Distills sessions into durable memories (if ANTHROPIC_API_KEY is set)
+#   3. Distills sessions into durable memories via local Ollama (if running)
 #   4. Registers the MCP server with Claude Code (user scope — all projects)
 #   5. Optionally installs the hourly auto-import LaunchAgent (macOS)
 
@@ -45,24 +45,17 @@ else
 fi
 
 # ── 3. Distill sessions ────────────────────────────────────────────────────────
-ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}"
-if [[ -z "$ANTHROPIC_API_KEY" && -f "$HOME/.claude/.env" ]]; then
-  # shellcheck disable=SC1090
-  source "$HOME/.claude/.env"
-fi
-
-if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
-  echo ""
-  echo "▶ Distilling sessions into durable memories..."
+echo ""
+if curl -s --max-time 2 http://localhost:11434/api/tags &>/dev/null; then
+  echo "▶ Distilling sessions into durable memories (via Ollama)..."
   docker compose run --rm -T \
-    -e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
+    -e OLLAMA_URL="http://host.docker.internal:11434/v1" \
     -v "$SCRIPT_DIR/distill_sessions.py:/app/distill_sessions.py:ro" \
     mcp-server \
     python /app/distill_sessions.py
 else
-  echo ""
-  echo "  ANTHROPIC_API_KEY not set — skipping distillation."
-  echo "  Set it in ~/.claude/.env and run: bash distill_sessions.sh (or import-cron.sh)"
+  echo "  Ollama not running — skipping distillation."
+  echo "  Start Ollama ('ollama serve') and run import-cron.sh to distill later."
 fi
 
 # ── 4. Register with Claude Code ───────────────────────────────────────────────
