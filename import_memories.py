@@ -65,12 +65,14 @@ def insert_memory(cur, content, tags, source, project="", created_at=None):
     vector = embed(content)
     if created_at:
         cur.execute(
-            "INSERT INTO memories (content, tags, source, project, embedding, created_at) VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
+            "INSERT INTO memories (content, tags, source, project, embedding, created_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (content_hash) DO NOTHING",
             (content, tags, source, project, vector, created_at),
         )
     else:
         cur.execute(
-            "INSERT INTO memories (content, tags, source, project, embedding) VALUES (%s, %s, %s, %s, %s)",
+            "INSERT INTO memories (content, tags, source, project, embedding) "
+            "VALUES (%s, %s, %s, %s, %s) ON CONFLICT (content_hash) DO NOTHING",
             (content, tags, source, project, vector),
         )
 
@@ -97,7 +99,7 @@ def is_session_already_processed(conn, session_id):
         row = cur.fetchone()
     if row is None:
         return False  # never imported
-    return row[0]  # True if distilled, False if imported but not yet distilled
+    return True  # already imported (regardless of distillation status)
 
 
 def record_session(conn, session_id, project, message_count):
