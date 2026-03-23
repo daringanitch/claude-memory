@@ -60,7 +60,7 @@ def save_memory(content: str, tags: list[str] = [], source: str = "claude-code",
     try:
         with db_conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                # Semantic dedup check
+                # Semantic dedup check (catches near-duplicates the unique constraint won't)
                 cur.execute(
                     "SELECT id, content, ROUND((1 - (embedding <=> %s))::numeric, 4) AS sim "
                     "FROM memories WHERE (1 - (embedding <=> %s)) >= 0.92 "
@@ -70,12 +70,18 @@ def save_memory(content: str, tags: list[str] = [], source: str = "claude-code",
                 dup = cur.fetchone()
                 if dup:
                     return f"Duplicate of memory ID {dup['id']} (similarity {dup['sim']}): {dup['content'][:80]}..."
+                # ON CONFLICT on content_hash handles exact-duplicate races atomically
                 cur.execute(
-                    "INSERT INTO memories (content, tags, source, project, embedding) VALUES (%s, %s, %s, %s, %s) RETURNING id, created_at",
+                    "INSERT INTO memories (content, tags, source, project, embedding) "
+                    "VALUES (%s, %s, %s, %s, %s) "
+                    "ON CONFLICT (content_hash) DO NOTHING "
+                    "RETURNING id, created_at",
                     (content, tags, source, project, vector)
                 )
                 row = cur.fetchone()
             conn.commit()
+        if row is None:
+            return "Duplicate (exact match already stored)."
         log.info("Memory saved id=%s project=%s", row['id'], project or "(none)")
         return f"✅ Memory saved (ID: {row['id']}, created: {row['created_at']})"
     except Exception as e:
