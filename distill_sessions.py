@@ -223,7 +223,8 @@ def distill_session(embedder, client, model, session, dry_run=False):
             with conn.cursor() as cur:
                 psycopg2.extras.execute_values(
                     cur,
-                    "INSERT INTO memories (content, tags, source, project, embedding) VALUES %s",
+                    "INSERT INTO memories (content, tags, source, project, embedding) VALUES %s "
+                    "ON CONFLICT (content_hash) DO NOTHING",
                     rows,
                 )
                 cur.execute("DELETE FROM memories WHERE source = %s", (f"claude-code/{session_prefix}",))
