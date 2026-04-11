@@ -39,6 +39,57 @@ class TestParseDt:
         assert "not-a-date" in err
 
 
+class TestCheckMemory:
+    def _make_conn(self, row):
+        conn = MagicMock()
+        cur = MagicMock()
+        cur.__enter__ = MagicMock(return_value=cur)
+        cur.__exit__ = MagicMock(return_value=False)
+        cur.fetchone.return_value = row
+        conn.cursor.return_value = cur
+        conn.__enter__ = MagicMock(return_value=conn)
+        conn.__exit__ = MagicMock(return_value=False)
+        return conn
+
+    def test_add_when_no_memories(self):
+        conn = self._make_conn(None)
+        with patch("server.db_conn") as mock_db:
+            mock_db.return_value.__enter__ = MagicMock(return_value=conn)
+            mock_db.return_value.__exit__ = MagicMock(return_value=False)
+            result = server.check_memory("something new")
+        data = json.loads(result)
+        assert data["action"] == "ADD"
+
+    def test_noop_when_duplicate(self):
+        conn = self._make_conn({"id": 1, "content": "existing", "sim": 0.95})
+        with patch("server.db_conn") as mock_db:
+            mock_db.return_value.__enter__ = MagicMock(return_value=conn)
+            mock_db.return_value.__exit__ = MagicMock(return_value=False)
+            result = server.check_memory("existing content")
+        data = json.loads(result)
+        assert data["action"] == "NOOP"
+        assert data["target_id"] == 1
+
+    def test_update_when_similar(self):
+        conn = self._make_conn({"id": 2, "content": "similar memory", "sim": 0.80})
+        with patch("server.db_conn") as mock_db:
+            mock_db.return_value.__enter__ = MagicMock(return_value=conn)
+            mock_db.return_value.__exit__ = MagicMock(return_value=False)
+            result = server.check_memory("similar content")
+        data = json.loads(result)
+        assert data["action"] == "UPDATE"
+        assert data["target_id"] == 2
+
+    def test_add_when_below_thresholds(self):
+        conn = self._make_conn({"id": 3, "content": "unrelated", "sim": 0.50})
+        with patch("server.db_conn") as mock_db:
+            mock_db.return_value.__enter__ = MagicMock(return_value=conn)
+            mock_db.return_value.__exit__ = MagicMock(return_value=False)
+            result = server.check_memory("new topic")
+        data = json.loads(result)
+        assert data["action"] == "ADD"
+
+
 class TestSaveMemory:
     def _make_conn(self, dup_row=None, insert_row=None):
         """Build a mock connection that simulates DB interactions."""
@@ -496,6 +547,10 @@ class TestFindDuplicates:
 
     def test_invalid_threshold_too_high(self):
         result = server.find_duplicates(threshold=1.1)
+        assert "❌" in result
+
+    def test_invalid_scan_limit(self):
+        result = server.find_duplicates(scan_limit=5)
         assert "❌" in result
 
     def test_no_duplicates_returns_message(self):
