@@ -27,12 +27,19 @@ sys.modules.setdefault("psycopg2.pool", mock_psycopg2.pool)
 mock_openai = MagicMock()
 sys.modules.setdefault("openai", mock_openai)
 
+# --- starlette ---
+mock_starlette = MagicMock()
+sys.modules.setdefault("starlette", mock_starlette)
+sys.modules.setdefault("starlette.requests", mock_starlette.requests)
+sys.modules.setdefault("starlette.responses", mock_starlette.responses)
+
 # --- mcp ---
 mock_mcp = MagicMock()
 mock_fastmcp = MagicMock()
 mock_fastmcp_instance = MagicMock()
-# Make @mcp.tool() a pass-through decorator so the function stays callable
+# Make @mcp.tool() and @mcp.custom_route() pass-through decorators
 mock_fastmcp_instance.tool.return_value = lambda f: f
+mock_fastmcp_instance.custom_route.return_value = lambda f: f
 mock_fastmcp.FastMCP.return_value = mock_fastmcp_instance
 sys.modules.setdefault("mcp", mock_mcp)
 sys.modules.setdefault("mcp.server", mock_mcp)

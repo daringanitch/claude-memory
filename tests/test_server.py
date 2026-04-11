@@ -214,3 +214,73 @@ class TestExportMemories:
     def test_invalid_since_returns_error(self):
         result = server.export_memories(since="bad")
         assert "❌" in result
+
+
+class TestHybridSearch:
+    def _make_conn(self, rows):
+        conn = MagicMock()
+        cur = MagicMock()
+        cur.__enter__ = MagicMock(return_value=cur)
+        cur.__exit__ = MagicMock(return_value=False)
+        cur.fetchall.return_value = rows
+        conn.cursor.return_value = cur
+        conn.__enter__ = MagicMock(return_value=conn)
+        conn.__exit__ = MagicMock(return_value=False)
+        return conn
+
+    def test_weights_must_sum_to_one(self):
+        result = server.hybrid_search("query", keyword_weight=0.6, semantic_weight=0.6)
+        assert "❌" in result
+        assert "1.0" in result
+
+    def test_negative_weight_rejected(self):
+        result = server.hybrid_search("query", keyword_weight=-0.1, semantic_weight=1.1)
+        assert "❌" in result
+
+    def test_invalid_since_returns_error(self):
+        result = server.hybrid_search("query", since="not-a-date")
+        assert "❌" in result
+
+    def test_invalid_before_returns_error(self):
+        result = server.hybrid_search("query", before="not-a-date")
+        assert "❌" in result
+
+    def test_no_results_returns_message(self):
+        conn = self._make_conn([])
+        with patch("server.db_conn") as mock_db:
+            mock_db.return_value.__enter__ = MagicMock(return_value=conn)
+            mock_db.return_value.__exit__ = MagicMock(return_value=False)
+            result = server.hybrid_search("obscure query")
+        assert "No memories found" in result
+
+    def test_results_returned_as_json(self):
+        row = {
+            "id": 1, "content": "test memory", "tags": [], "source": "x",
+            "project": "", "created_at": datetime(2026, 1, 1),
+            "keyword_score": 0.5, "semantic_score": 0.8, "hybrid_score": 0.59,
+        }
+        conn = self._make_conn([row])
+        with patch("server.db_conn") as mock_db:
+            mock_db.return_value.__enter__ = MagicMock(return_value=conn)
+            mock_db.return_value.__exit__ = MagicMock(return_value=False)
+            result = server.hybrid_search("test")
+        data = json.loads(result)
+        assert len(data) == 1
+        assert data[0]["content"] == "test memory"
+        assert "hybrid_score" in data[0]
+        assert "keyword_score" in data[0]
+        assert "semantic_score" in data[0]
+
+    def test_custom_weights_accepted(self):
+        row = {
+            "id": 2, "content": "pure keyword match", "tags": [], "source": "y",
+            "project": "", "created_at": datetime(2026, 1, 1),
+            "keyword_score": 0.9, "semantic_score": 0.1, "hybrid_score": 0.9,
+        }
+        conn = self._make_conn([row])
+        with patch("server.db_conn") as mock_db:
+            mock_db.return_value.__enter__ = MagicMock(return_value=conn)
+            mock_db.return_value.__exit__ = MagicMock(return_value=False)
+            result = server.hybrid_search("pure keyword match", keyword_weight=1.0, semantic_weight=0.0)
+        data = json.loads(result)
+        assert data[0]["id"] == 2
