@@ -7,9 +7,9 @@ Persistent vector memory for Claude Code. Stores your Claude sessions, notes, an
 Two Docker containers:
 
 - **PostgreSQL 16 + pgvector** — stores memories as text + 768-dimensional embeddings
-- **FastMCP server (port 3333)** — exposes 11 tools to Claude via the MCP protocol over SSE
+- **FastMCP server (port 3333)** — exposes 17 tools to Claude via the MCP protocol over SSE
 
-When registered as an MCP server, Claude can search your memory by meaning (`semantic_search`), keyword (`search_memories`), or tag (`list_memories`) — and save new memories automatically during a session. A connection pool keeps 1–5 persistent DB connections so tool calls are fast.
+When registered as an MCP server, Claude can search your memory by meaning (`semantic_search`), keyword (`search_memories`), or hybrid scoring (`hybrid_search`) — and save new memories automatically during a session. A connection pool keeps 1–5 persistent DB connections so tool calls are fast.
 
 ## Quick start
 
@@ -73,6 +73,12 @@ docker compose run --rm -T \
   mcp-server python /app/import_memories.py --claude-code --min-length 100
 ```
 
+After a bulk import, clear the search cache so results reflect the new data:
+
+```bash
+curl -X POST http://localhost:3333/cache/invalidate
+```
+
 ## Distilling sessions
 
 Raw imported messages are verbose. `distill_sessions.py` uses a local Ollama LLM to extract durable knowledge — decisions, patterns, bug root causes — and replaces raw messages with concise, searchable memories. No API key required.
@@ -100,7 +106,13 @@ docker compose run --rm -T \
 
 # Tune parallelism or swap models
   mcp-server python /app/distill_sessions.py --workers 8 --model llama3.2:3b
+
+# Reset distillation failures so capped sessions can be retried
+  mcp-server python /app/distill_sessions.py --reset-failures           # reset all capped
+  mcp-server python /app/distill_sessions.py --reset-failures abc12345  # reset one session
 ```
+
+Sessions that fail distillation 3 times are capped and skipped automatically. Use `--reset-failures` to retry them.
 
 Speed notes: sessions are processed in parallel (`--workers`, default 4), embeddings are batched per session, and DB inserts are bulk operations — roughly 4x faster than sequential processing.
 
@@ -133,24 +145,53 @@ bash restore.sh backups/claude-memory-2026-03-08T12-00-00.pgdump
 | Tool | Key Parameters | Description |
 |------|---------------|-------------|
 | `save_memory` | `content`, `tags[]`, `source`, `project` | Save a note; auto-deduplicates at ≥0.92 cosine similarity |
-| `semantic_search` | `query`, `limit`, `min_similarity`, `project`, `since`, `before` | Search by **meaning** using vector cosine similarity |
-| `search_memories` | `query`, `limit`, `project`, `since`, `before` | Search by **keyword** using PostgreSQL full-text search |
-| `list_memories` | `limit`, `tag`, `project`, `since`, `before` | List recent memories, optionally filtered |
+| `check_memory` | `content` | Dry-run write guard — returns ADD/UPDATE/NOOP with nearest match preview |
+| `semantic_search` | `query`, `limit`, `min_similarity`, `project`, `since`, `before` | Search by **meaning** using vector cosine similarity (cached 10 min) |
+| `search_memories` | `query`, `limit`, `project`, `since`, `before` | Search by **keyword** using PostgreSQL full-text search (cached 10 min) |
+| `hybrid_search` | `query`, `limit`, `keyword_weight`, `semantic_weight`, `project`, `since`, `before` | Combined keyword + semantic search with configurable weights |
+| `list_memories` | `limit`, `offset`, `tag`, `project`, `since`, `before` | Paginated list; returns `{total, limit, offset, memories[]}` |
 | `get_memory` | `memory_id` | Fetch a single memory by ID with full content |
-| `recent_context` | `project`, `limit` | Recent distilled memories — use at session start for context recall |
-| `update_memory` | `memory_id`, `content`, `tags[]` | Update content or tags (re-embeds automatically if content changes) |
-| `delete_memory` | `memory_id` | Delete a memory by ID |
+| `recent_context` | `project`, `limit` | Recent distilled memories — falls back to active memories if none distilled |
+| `update_memory` | `memory_id`, `content`, `tags[]`, `force` | Update content or tags (re-embeds automatically if content changes) |
+| `delete_memory` | `memory_id` | Soft-delete (hidden from search, recoverable) |
+| `restore_memory` | `memory_id` | Restore a soft-deleted memory |
+| `purge_memory` | `memory_id` | Permanently delete (must soft-delete first — two-step safety gate) |
+| `find_duplicates` | `threshold`, `limit`, `project`, `scan_limit` | Find near-duplicate memory pairs; `scan_limit` bounds the scan (default 500) |
+| `bulk_delete` | `tag`, `project`, `source`, `dry_run` | Soft-delete all matching memories (`dry_run=True` by default — preview first) |
 | `list_tags` | — | List all tags with occurrence counts |
-| `get_stats` | — | Memory counts by project/source, session import and distill status |
+| `get_stats` | — | Memory counts by project/source, deleted count, session import and distill status |
 | `export_memories` | `project`, `tag`, `since`, `before`, `output_format` | Export memories as JSON or markdown |
 
 `since` and `before` accept ISO date strings: `"2026-01-01"` or `"2026-01-01T12:00:00"`.
+
+### HTTP endpoints
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /health` | Liveness probe — returns `{"status":"ok"}` (200) or `{"status":"degraded"}` (503) |
+| `POST /cache/invalidate` | Clear the in-process search cache — call after bulk imports to avoid stale results |
+
+## Migrations
+
+Schema changes that need to be applied to existing databases are in `migrations/`:
+
+```bash
+# Apply migration (idempotent — safe to re-run)
+docker exec -i claude-memory-db psql -U claude -d memory \
+  < migrations/003_distill_failure_cap.sql
+```
+
+| File | What it adds |
+|------|-------------|
+| `001_soft_deletes.sql` | `deleted_at` column on `memories` |
+| `002_content_hash_dedup.sql` | `content_hash` unique index for insert dedup |
+| `003_distill_failure_cap.sql` | `distill_failures` column on `imported_sessions` |
 
 ## Tests
 
 ```bash
 brew install pytest   # one-time
-pytest tests/ -v      # 37 tests, no Docker or GPU required
+pytest tests/ -v      # 76 tests, no Docker or GPU required
 ```
 
 All heavy dependencies (sentence-transformers, psycopg2, openai) are mocked by `tests/conftest.py`.
@@ -174,26 +215,29 @@ with descriptive tags like ["project:name", "type:decision|bug|preference|patter
 
 ```sql
 CREATE TABLE memories (
-  id         SERIAL PRIMARY KEY,
-  content    TEXT         NOT NULL,
-  tags       TEXT[]       DEFAULT '{}',
-  source     VARCHAR(100) DEFAULT 'claude-code',
-  project    VARCHAR(100) DEFAULT '',
-  embedding  vector(768),
-  created_at TIMESTAMP    DEFAULT NOW(),
-  updated_at TIMESTAMP    DEFAULT NOW()
+  id           SERIAL PRIMARY KEY,
+  content      TEXT         NOT NULL,
+  content_hash VARCHAR(64)  GENERATED ALWAYS AS (md5(content)) STORED UNIQUE,
+  tags         TEXT[]       DEFAULT '{}',
+  source       VARCHAR(100) DEFAULT 'claude-code',
+  project      VARCHAR(100) DEFAULT '',
+  embedding    vector(768),
+  created_at   TIMESTAMP    DEFAULT NOW(),
+  updated_at   TIMESTAMP    DEFAULT NOW(),
+  deleted_at   TIMESTAMP    DEFAULT NULL
 );
 
 CREATE TABLE imported_sessions (
-  session_id    VARCHAR(100) PRIMARY KEY,
-  project       VARCHAR(100) DEFAULT '',
-  imported_at   TIMESTAMP    DEFAULT NOW(),
-  message_count INT          DEFAULT 0,
-  distilled     BOOLEAN      DEFAULT FALSE
+  session_id        VARCHAR(100) PRIMARY KEY,
+  project           VARCHAR(100) DEFAULT '',
+  imported_at       TIMESTAMP    DEFAULT NOW(),
+  message_count     INT          DEFAULT 0,
+  distilled         BOOLEAN      DEFAULT FALSE,
+  distill_failures  INT          DEFAULT 0
 );
 ```
 
-Indexes: IVFFlat for vector cosine search, GIN for tag arrays and full-text search, BTREE on `created_at` and `project`.
+Indexes: IVFFlat for vector cosine search, GIN for tag arrays and full-text search, BTREE on `created_at`, `project`, and `deleted_at`.
 
 ## Configuration
 
@@ -206,6 +250,8 @@ Indexes: IVFFlat for vector cosine search, GIN for tag arrays and full-text sear
 | `OLLAMA_URL` | `http://localhost:11434/v1` (use `http://host.docker.internal:11434/v1` inside Docker) |
 | `DISTILL_MODEL` | `qwen2.5:7b` |
 | `DISTILL_WORKERS` | `4` |
+| `TRANSFORMERS_OFFLINE` | `1` (set in Docker) |
+| `HF_DATASETS_OFFLINE` | `1` (set in Docker) |
 
 Data is persisted to `./data/postgres/`. The HuggingFace model cache is stored in a named Docker volume (`model_cache`) so `all-mpnet-base-v2` isn't re-downloaded on restart.
 
