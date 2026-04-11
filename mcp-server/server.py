@@ -207,6 +207,82 @@ def search_memories(query: str, limit: int = 10, project: str = None,
 
 
 @mcp.tool()
+def hybrid_search(query: str, limit: int = 10, keyword_weight: float = 0.7,
+                  semantic_weight: float = 0.3, min_semantic_similarity: float = 0.1,
+                  project: str = None, since: str = None, before: str = None) -> str:
+    """Search memories by combining keyword (ts_rank) and semantic (vector) scores.
+    keyword_weight + semantic_weight must equal 1.0 (defaults: 0.7 / 0.3).
+    Each result includes keyword_score, semantic_score, and hybrid_score."""
+    if abs(keyword_weight + semantic_weight - 1.0) > 1e-6:
+        return "❌ keyword_weight + semantic_weight must equal 1.0"
+    if keyword_weight < 0 or semantic_weight < 0:
+        return "❌ weights must be non-negative"
+
+    since_dt, err = _parse_dt(since, "since")
+    if err:
+        return err
+    before_dt, err = _parse_dt(before, "before")
+    if err:
+        return err
+
+    vector = embed(query)
+
+    extra_conditions = []
+    extra_params = []
+    if project:
+        extra_conditions.append("project = %s")
+        extra_params.append(project)
+    if since_dt:
+        extra_conditions.append("created_at >= %s")
+        extra_params.append(since_dt)
+    if before_dt:
+        extra_conditions.append("created_at < %s")
+        extra_params.append(before_dt)
+
+    extra_where = (" AND " + " AND ".join(extra_conditions)) if extra_conditions else ""
+
+    sql = f"""
+WITH candidates AS (
+  SELECT id, content, tags, source, project, created_at,
+    COALESCE(ts_rank(to_tsvector('english', content), plainto_tsquery('english', %s)), 0) AS kw_score,
+    CASE WHEN embedding IS NOT NULL
+         THEN GREATEST(1 - (embedding <=> %s), 0)
+         ELSE 0 END AS sem_score
+  FROM memories
+  WHERE deleted_at IS NULL
+    AND (
+      to_tsvector('english', content) @@ plainto_tsquery('english', %s)
+      OR content ILIKE %s
+      OR (embedding IS NOT NULL AND (1 - (embedding <=> %s)) >= %s)
+    )
+    {extra_where}
+)
+SELECT id, content, tags, source, project, created_at,
+  ROUND(kw_score::numeric, 4)  AS keyword_score,
+  ROUND(sem_score::numeric, 4) AS semantic_score,
+  ROUND((%s * kw_score + %s * sem_score)::numeric, 4) AS hybrid_score
+FROM candidates
+ORDER BY hybrid_score DESC
+LIMIT %s
+"""
+    # params order: kw_score ts_rank query, sem_score embed, WHERE ts @@ query, WHERE ILIKE,
+    #               WHERE sem >= threshold, [extra], kw_weight, sem_weight, limit
+    params = [query, vector, query, f"%{query}%", vector, min_semantic_similarity] + extra_params + [keyword_weight, semantic_weight, limit]
+
+    try:
+        with db_conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+        if not rows:
+            return f"No memories found for: '{query}'"
+        return json.dumps([dict(r) for r in rows], indent=2, default=str)
+    except Exception as e:
+        log.error("hybrid_search failed: %s", e)
+        return f"❌ Error: {e}"
+
+
+@mcp.tool()
 def list_memories(limit: int = 20, tag: str = None, project: str = None,
                   since: str = None, before: str = None) -> str:
     """List recent memories, optionally filtered by tag, project, and/or date range (ISO dates)."""
