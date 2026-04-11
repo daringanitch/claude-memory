@@ -587,6 +587,8 @@ def get_stats() -> str:
                 sessions_total = cur.fetchone()[0]
                 cur.execute("SELECT COUNT(*) FROM imported_sessions WHERE distilled = TRUE")
                 sessions_distilled = cur.fetchone()[0]
+                cur.execute("SELECT COUNT(*) FROM imported_sessions WHERE distill_failures >= 3")
+                sessions_capped = cur.fetchone()[0]
         with _cache_lock:
             cache_size = len(_search_cache)
         return json.dumps({
@@ -597,7 +599,8 @@ def get_stats() -> str:
             "sessions": {
                 "total": sessions_total,
                 "distilled": sessions_distilled,
-                "pending_distill": sessions_total - sessions_distilled
+                "capped": sessions_capped,
+                "pending_distill": sessions_total - sessions_distilled - sessions_capped
             },
             "search_cache": {
                 "entries": cache_size,

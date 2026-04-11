@@ -20,11 +20,12 @@ CREATE INDEX idx_memories_embedding ON memories USING ivfflat (embedding vector_
 CREATE INDEX idx_memories_deleted_at ON memories(deleted_at) WHERE deleted_at IS NULL;
 
 CREATE TABLE imported_sessions (
-  session_id    VARCHAR(100) PRIMARY KEY,
-  project       VARCHAR(100) DEFAULT '',
-  imported_at   TIMESTAMP    DEFAULT NOW(),
-  message_count INT          DEFAULT 0,
-  distilled     BOOLEAN      DEFAULT FALSE
+  session_id       VARCHAR(100) PRIMARY KEY,
+  project          VARCHAR(100) DEFAULT '',
+  imported_at      TIMESTAMP    DEFAULT NOW(),
+  message_count    INT          DEFAULT 0,
+  distilled        BOOLEAN      DEFAULT FALSE,
+  distill_failures INT          DEFAULT 0
 );
 
 CREATE OR REPLACE FUNCTION update_updated_at()
