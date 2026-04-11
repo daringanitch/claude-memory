@@ -253,7 +253,32 @@ def main():
                         help=f"Ollama model (default: {DEFAULT_MODEL})")
     parser.add_argument("--ollama-url", default=OLLAMA_URL,
                         help=f"Ollama base URL (default: {OLLAMA_URL})")
+    parser.add_argument("--reset-failures", metavar="SESSION_ID", nargs="?", const="ALL",
+                        help="Reset distill_failures to 0 so capped sessions can be retried. "
+                             "Pass a session ID to reset one session, or omit the value to reset all capped sessions.")
     args = parser.parse_args()
+
+    if args.reset_failures is not None:
+        conn = get_db()
+        with conn.cursor() as cur:
+            if args.reset_failures == "ALL":
+                cur.execute(
+                    "UPDATE imported_sessions SET distill_failures = 0 WHERE distill_failures >= %s",
+                    (DISTILL_FAILURE_CAP,)
+                )
+                log.info("Reset distill_failures for %d capped session(s)", cur.rowcount)
+            else:
+                cur.execute(
+                    "UPDATE imported_sessions SET distill_failures = 0 WHERE session_id = %s",
+                    (args.reset_failures,)
+                )
+                if cur.rowcount:
+                    log.info("Reset distill_failures for session %s", args.reset_failures)
+                else:
+                    log.warning("Session not found: %s", args.reset_failures)
+        conn.commit()
+        conn.close()
+        return
 
     log.info("Loading embedding model...")
     embedder = SentenceTransformer("all-mpnet-base-v2")

@@ -20,6 +20,10 @@ log = logging.getLogger("claude-memory")
 mcp = FastMCP("claude-memory", host="0.0.0.0", port=3333)
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://claude:memory_pass@localhost:5432/memory")
 
+# ── Write guard thresholds ─────────────────────────────────────────────────────
+GUARD_NOOP_THRESHOLD   = 0.92  # identical meaning → skip
+GUARD_UPDATE_THRESHOLD = 0.75  # very similar → suggest update instead
+
 # ── Search cache ───────────────────────────────────────────────────────────────
 CACHE_MAX_SIZE    = 500   # max entries across all queries
 CACHE_TTL_SECONDS = 600   # 10 minutes
@@ -121,6 +125,50 @@ async def health_check(request: Request) -> JSONResponse:
     return JSONResponse(payload, status_code=200 if db_ok else 503)
 
 
+@mcp.custom_route("/cache/invalidate", methods=["POST"])
+async def cache_invalidate_endpoint(request: Request) -> JSONResponse:
+    """Force-clear the in-process search cache.
+    Call this after running import_memories.py or distill_sessions.py so results
+    reflect newly written memories without waiting for the 10-minute TTL."""
+    _cache_invalidate()
+    log.info("Search cache cleared via HTTP endpoint")
+    return JSONResponse({"status": "ok", "message": "Search cache cleared"})
+
+
+# ── Write guard ────────────────────────────────────────────────────────────────
+
+def _write_guard(content: str, vector) -> dict:
+    """Check what save_memory would do without writing.
+    Returns action=ADD|UPDATE|NOOP with similarity and nearest-match details."""
+    try:
+        with db_conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    "SELECT id, content, ROUND((1 - (embedding <=> %s))::numeric, 4) AS sim "
+                    "FROM memories WHERE deleted_at IS NULL AND embedding IS NOT NULL "
+                    "ORDER BY embedding <=> %s LIMIT 1",
+                    (vector, vector)
+                )
+                row = cur.fetchone()
+        if not row:
+            return {"action": "ADD", "reason": "No memories exist yet"}
+        sim = float(row["sim"])
+        if sim >= GUARD_NOOP_THRESHOLD:
+            return {"action": "NOOP", "similarity": sim, "target_id": row["id"],
+                    "target_preview": row["content"][:120],
+                    "reason": f"Near-duplicate at similarity {sim} — would be skipped"}
+        elif sim >= GUARD_UPDATE_THRESHOLD:
+            return {"action": "UPDATE", "similarity": sim, "target_id": row["id"],
+                    "target_preview": row["content"][:120],
+                    "reason": f"Similar memory (ID {row['id']}, similarity {sim}) — consider update_memory instead"}
+        else:
+            return {"action": "ADD", "similarity": sim,
+                    "reason": f"Nearest match is {sim} — below thresholds, would be saved as new memory"}
+    except Exception as e:
+        log.error("_write_guard failed: %s", e)
+        return {"action": "ADD", "reason": f"Guard check failed ({e}) — defaulting to ADD"}
+
+
 # ── MCP tools ─────────────────────────────────────────────────────────────────
 
 @mcp.tool()
@@ -162,6 +210,16 @@ def save_memory(content: str, tags: list[str] = [], source: str = "claude-code",
     except Exception as e:
         log.error("save_memory failed: %s", e)
         return f"❌ Error: {e}"
+
+
+@mcp.tool()
+def check_memory(content: str) -> str:
+    """Dry-run check: see what save_memory would do without actually writing.
+    Returns ADD (new memory), UPDATE (similar exists — consider update_memory),
+    or NOOP (near-duplicate — would be skipped)."""
+    vector = embed(content)
+    result = _write_guard(content, vector)
+    return json.dumps(result, indent=2)
 
 
 @mcp.tool()
@@ -729,21 +787,36 @@ def export_memories(project: str = None, tag: str = None, since: str = None,
 
 
 @mcp.tool()
-def find_duplicates(threshold: float = 0.85, limit: int = 20, project: str = None) -> str:
+def find_duplicates(threshold: float = 0.85, limit: int = 20, project: str = None,
+                    scan_limit: int = 500) -> str:
     """Find near-duplicate memory pairs above a similarity threshold.
     Returns pairs ordered by similarity descending — useful for database hygiene after bulk imports.
     threshold: minimum cosine similarity to report (default 0.85; must be between 0.5 and 1.0)
-    limit: max number of pairs to return (default 20)"""
+    limit: max number of pairs to return (default 20)
+    scan_limit: only consider the most recent N memories (default 500) to keep the
+                self-join bounded. Increase for deeper scans on large databases."""
     if not (0.5 <= threshold <= 1.0):
         return "❌ threshold must be between 0.5 and 1.0"
+    if scan_limit < 10:
+        return "❌ scan_limit must be at least 10"
 
     try:
         with db_conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                project_cond = "AND a.project = %s AND b.project = %s" if project else ""
-                project_params = [project, project] if project else []
+                project_cond = "AND project = %s" if project else ""
+                project_params = [project] if project else []
+                # Bound the self-join to the most recent scan_limit rows so the
+                # O(n²) comparison stays manageable on large databases.
                 cur.execute(
                     f"""
+                    WITH recent AS (
+                        SELECT id, content, embedding, created_at
+                        FROM memories
+                        WHERE deleted_at IS NULL AND embedding IS NOT NULL
+                        {project_cond}
+                        ORDER BY created_at DESC
+                        LIMIT %s
+                    )
                     SELECT
                         a.id   AS id_a,
                         b.id   AS id_b,
@@ -752,18 +825,13 @@ def find_duplicates(threshold: float = 0.85, limit: int = 20, project: str = Non
                         LEFT(b.content, 120) AS content_b,
                         a.created_at AS created_a,
                         b.created_at AS created_b
-                    FROM memories a
-                    JOIN memories b ON b.id > a.id
-                    WHERE a.deleted_at IS NULL
-                      AND b.deleted_at IS NULL
-                      AND a.embedding IS NOT NULL
-                      AND b.embedding IS NOT NULL
-                      AND (1 - (a.embedding <=> b.embedding)) >= %s
-                      {project_cond}
+                    FROM recent a
+                    JOIN recent b ON b.id > a.id
+                    WHERE (1 - (a.embedding <=> b.embedding)) >= %s
                     ORDER BY similarity DESC
                     LIMIT %s
                     """,
-                    [threshold] + project_params + [limit]
+                    project_params + [scan_limit, threshold, limit]
                 )
                 rows = cur.fetchall()
         if not rows:
