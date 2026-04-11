@@ -1,4 +1,5 @@
-import os, json, logging
+import os, json, logging, threading, time
+from collections import OrderedDict
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
@@ -18,6 +19,14 @@ log = logging.getLogger("claude-memory")
 
 mcp = FastMCP("claude-memory", host="0.0.0.0", port=3333)
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://claude:memory_pass@localhost:5432/memory")
+
+# ── Search cache ───────────────────────────────────────────────────────────────
+CACHE_MAX_SIZE    = 500   # max entries across all queries
+CACHE_TTL_SECONDS = 600   # 10 minutes
+
+_search_cache: OrderedDict = OrderedDict()  # key → (result_str, monotonic_timestamp)
+_cache_lock = threading.Lock()
+
 log.info("Loading embedding model...")
 embedder = SentenceTransformer("all-mpnet-base-v2")
 log.info("Connecting to database...")
@@ -53,6 +62,38 @@ def _parse_dt(value: str, name: str):
         return datetime.fromisoformat(value), None
     except ValueError:
         return None, f"❌ Invalid {name} date '{value}'. Use ISO format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS"
+
+
+# ── Search cache helpers ───────────────────────────────────────────────────────
+
+def _cache_get(key: tuple):
+    """Return cached result string, or None if missing or expired."""
+    with _cache_lock:
+        if key not in _search_cache:
+            return None
+        result, ts = _search_cache[key]
+        if time.monotonic() - ts > CACHE_TTL_SECONDS:
+            del _search_cache[key]
+            return None
+        _search_cache.move_to_end(key)  # mark as recently used
+        return result
+
+
+def _cache_set(key: tuple, result: str):
+    """Store result in cache, evicting the oldest entry if at capacity."""
+    with _cache_lock:
+        if key in _search_cache:
+            _search_cache.move_to_end(key)
+        _search_cache[key] = (result, time.monotonic())
+        while len(_search_cache) > CACHE_MAX_SIZE:
+            _search_cache.popitem(last=False)  # evict LRU
+
+
+def _cache_invalidate():
+    """Clear all cached search results. Call after any write operation."""
+    with _cache_lock:
+        _search_cache.clear()
+    log.debug("Search cache invalidated")
 
 
 # ── Health check endpoint ──────────────────────────────────────────────────────
@@ -115,6 +156,7 @@ def save_memory(content: str, tags: list[str] = [], source: str = "claude-code",
             conn.commit()
         if row is None:
             return "Duplicate (exact match already stored)."
+        _cache_invalidate()
         log.info("Memory saved id=%s project=%s", row['id'], project or "(none)")
         return f"✅ Memory saved (ID: {row['id']}, created: {row['created_at']})"
     except Exception as e:
@@ -132,6 +174,12 @@ def semantic_search(query: str, limit: int = 10, min_similarity: float = 0.3,
     before_dt, err = _parse_dt(before, "before")
     if err:
         return err
+
+    cache_key = ("semantic", query, limit, min_similarity, project or "", since or "", before or "")
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        log.debug("semantic_search cache hit query=%r", query)
+        return cached
 
     vector = embed(query)
     try:
@@ -159,7 +207,9 @@ def semantic_search(query: str, limit: int = 10, min_similarity: float = 0.3,
                 params = [vector] + cond_params + [vector, limit]
                 cur.execute(sql, params)
                 rows = cur.fetchall()
-        return json.dumps([dict(r) for r in rows], indent=2, default=str) if rows else f"No similar memories found for: '{query}'"
+        result = json.dumps([dict(r) for r in rows], indent=2, default=str) if rows else f"No similar memories found for: '{query}'"
+        _cache_set(cache_key, result)
+        return result
     except Exception as e:
         log.error("semantic_search failed: %s", e)
         return f"❌ Error: {e}"
@@ -175,6 +225,12 @@ def search_memories(query: str, limit: int = 10, project: str = None,
     before_dt, err = _parse_dt(before, "before")
     if err:
         return err
+
+    cache_key = ("keyword", query, limit, project or "", since or "", before or "")
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        log.debug("search_memories cache hit query=%r", query)
+        return cached
 
     try:
         with db_conn() as conn:
@@ -200,7 +256,9 @@ def search_memories(query: str, limit: int = 10, project: str = None,
                 )
                 cur.execute(sql, params)
                 rows = cur.fetchall()
-        return json.dumps([dict(r) for r in rows], indent=2, default=str) if rows else f"No memories found for: '{query}'"
+        result = json.dumps([dict(r) for r in rows], indent=2, default=str) if rows else f"No memories found for: '{query}'"
+        _cache_set(cache_key, result)
+        return result
     except Exception as e:
         log.error("search_memories failed: %s", e)
         return f"❌ Error: {e}"
@@ -416,6 +474,8 @@ def update_memory(memory_id: int, content: str = None, tags: list[str] = None, f
                     )
                 updated = cur.rowcount
             conn.commit()
+        if updated:
+            _cache_invalidate()
         log.info("Memory updated id=%s", memory_id)
         return f"✅ Memory {memory_id} updated." if updated else f"❌ No active memory with ID {memory_id}"
     except Exception as e:
@@ -436,6 +496,8 @@ def delete_memory(memory_id: int) -> str:
                 )
                 deleted = cur.rowcount
             conn.commit()
+        if deleted:
+            _cache_invalidate()
         log.info("Memory soft-deleted id=%s", memory_id)
         return f"✅ Memory {memory_id} deleted." if deleted else f"❌ No active memory with ID {memory_id}"
     except Exception as e:
@@ -455,6 +517,8 @@ def restore_memory(memory_id: int) -> str:
                 )
                 restored = cur.rowcount
             conn.commit()
+        if restored:
+            _cache_invalidate()
         log.info("Memory restored id=%s", memory_id)
         return f"✅ Memory {memory_id} restored." if restored else f"❌ No deleted memory with ID {memory_id}"
     except Exception as e:
@@ -475,6 +539,8 @@ def purge_memory(memory_id: int) -> str:
                 )
                 purged = cur.rowcount
             conn.commit()
+        if purged:
+            _cache_invalidate()
         log.info("Memory purged id=%s", memory_id)
         return (
             f"✅ Memory {memory_id} permanently purged."
@@ -521,6 +587,8 @@ def get_stats() -> str:
                 sessions_total = cur.fetchone()[0]
                 cur.execute("SELECT COUNT(*) FROM imported_sessions WHERE distilled = TRUE")
                 sessions_distilled = cur.fetchone()[0]
+        with _cache_lock:
+            cache_size = len(_search_cache)
         return json.dumps({
             "total_memories": total,
             "deleted_memories": total_deleted,
@@ -530,6 +598,11 @@ def get_stats() -> str:
                 "total": sessions_total,
                 "distilled": sessions_distilled,
                 "pending_distill": sessions_total - sessions_distilled
+            },
+            "search_cache": {
+                "entries": cache_size,
+                "max_size": CACHE_MAX_SIZE,
+                "ttl_seconds": CACHE_TTL_SECONDS,
             }
         }, indent=2)
     except Exception as e:
