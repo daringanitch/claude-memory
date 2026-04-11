@@ -341,9 +341,11 @@ LIMIT %s
 
 
 @mcp.tool()
-def list_memories(limit: int = 20, tag: str = None, project: str = None,
+def list_memories(limit: int = 20, offset: int = 0, tag: str = None, project: str = None,
                   since: str = None, before: str = None) -> str:
-    """List recent memories, optionally filtered by tag, project, and/or date range (ISO dates)."""
+    """List recent memories with pagination. Returns rows plus total count matching the filters.
+    Use offset to page through results (e.g. offset=20 for page 2 with limit=20).
+    Optionally filter by tag, project, and/or date range (ISO dates)."""
     since_dt, err = _parse_dt(since, "since")
     if err:
         return err
@@ -368,13 +370,24 @@ def list_memories(limit: int = 20, tag: str = None, project: str = None,
                 if before_dt:
                     conditions.append("created_at < %s")
                     params.append(before_dt)
-                params.append(limit)
+                where = ' AND '.join(conditions)
+                # Count total matching rows, then fetch the page
+                cur.execute(f"SELECT COUNT(*) FROM memories WHERE {where}", params)
+                total = cur.fetchone()["count"]
                 cur.execute(
-                    f"SELECT id, content, tags, source, project, created_at FROM memories WHERE {' AND '.join(conditions)} ORDER BY created_at DESC LIMIT %s",
-                    params
+                    f"SELECT id, content, tags, source, project, created_at FROM memories "
+                    f"WHERE {where} ORDER BY created_at DESC LIMIT %s OFFSET %s",
+                    params + [limit, offset]
                 )
                 rows = cur.fetchall()
-        return json.dumps([dict(r) for r in rows], indent=2, default=str) if rows else "No memories stored yet."
+        if not rows and offset == 0:
+            return "No memories stored yet."
+        return json.dumps({
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "memories": [dict(r) for r in rows],
+        }, indent=2, default=str)
     except Exception as e:
         log.error("list_memories failed: %s", e)
         return f"❌ Error: {e}"
@@ -399,26 +412,40 @@ def get_memory(memory_id: int) -> str:
 
 @mcp.tool()
 def recent_context(project: str = None, limit: int = 10) -> str:
-    """Return recent distilled memories — ideal for session start context recall. Filter by project for focused recall."""
+    """Return recent distilled memories — ideal for session start context recall.
+    Falls back to the most recent non-distilled memories if no distilled ones exist yet.
+    Filter by project for focused recall."""
     try:
         with db_conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                if project:
-                    cur.execute(
-                        "SELECT id, content, tags, source, project, created_at FROM memories "
-                        "WHERE 'distilled' = ANY(tags) AND project = %s AND deleted_at IS NULL "
-                        "ORDER BY created_at DESC LIMIT %s",
-                        (project, limit)
-                    )
-                else:
-                    cur.execute(
-                        "SELECT id, content, tags, source, project, created_at FROM memories "
-                        "WHERE 'distilled' = ANY(tags) AND deleted_at IS NULL "
-                        "ORDER BY created_at DESC LIMIT %s",
-                        (limit,)
-                    )
+                project_cond = "AND project = %s " if project else ""
+                project_param = (project,) if project else ()
+                cur.execute(
+                    "SELECT id, content, tags, source, project, created_at FROM memories "
+                    f"WHERE 'distilled' = ANY(tags) AND deleted_at IS NULL {project_cond}"
+                    "ORDER BY created_at DESC LIMIT %s",
+                    project_param + (limit,)
+                )
                 rows = cur.fetchall()
-        return json.dumps([dict(r) for r in rows], indent=2, default=str) if rows else "No distilled memories yet. Run distill_sessions.py to generate them."
+                if not rows:
+                    # Fallback: most recent active memories regardless of distilled tag
+                    cur.execute(
+                        "SELECT id, content, tags, source, project, created_at FROM memories "
+                        f"WHERE deleted_at IS NULL {project_cond}"
+                        "ORDER BY created_at DESC LIMIT %s",
+                        project_param + (limit,)
+                    )
+                    rows = cur.fetchall()
+                    if rows:
+                        log.info("recent_context: no distilled memories, returning %d recent memories", len(rows))
+        if not rows:
+            return "No memories found. Save some memories first."
+        result = [dict(r) for r in rows]
+        distilled = all("distilled" in (r.get("tags") or []) for r in result)
+        return json.dumps({
+            "distilled": distilled,
+            "memories": result,
+        }, indent=2, default=str)
     except Exception as e:
         log.error("recent_context failed: %s", e)
         return f"❌ Error: {e}"
@@ -575,32 +602,54 @@ def get_stats() -> str:
     try:
         with db_conn() as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT COUNT(*) FROM memories WHERE deleted_at IS NULL")
-                total = cur.fetchone()[0]
-                cur.execute("SELECT COUNT(*) FROM memories WHERE deleted_at IS NOT NULL")
-                total_deleted = cur.fetchone()[0]
-                cur.execute("SELECT COALESCE(NULLIF(project,''), '(none)'), COUNT(*) FROM memories WHERE deleted_at IS NULL GROUP BY project ORDER BY COUNT(*) DESC")
-                by_project = cur.fetchall()
-                cur.execute("SELECT source, COUNT(*) FROM memories WHERE deleted_at IS NULL GROUP BY source ORDER BY COUNT(*) DESC LIMIT 10")
-                by_source = cur.fetchall()
-                cur.execute("SELECT COUNT(*) FROM imported_sessions")
-                sessions_total = cur.fetchone()[0]
-                cur.execute("SELECT COUNT(*) FROM imported_sessions WHERE distilled = TRUE")
-                sessions_distilled = cur.fetchone()[0]
-                cur.execute("SELECT COUNT(*) FROM imported_sessions WHERE distill_failures >= 3")
-                sessions_capped = cur.fetchone()[0]
+                # Single CTE covers all memory aggregates in one round-trip
+                cur.execute("""
+                    WITH mem AS (
+                        SELECT
+                            COUNT(*) FILTER (WHERE deleted_at IS NULL)     AS total,
+                            COUNT(*) FILTER (WHERE deleted_at IS NOT NULL) AS deleted
+                        FROM memories
+                    ),
+                    by_proj AS (
+                        SELECT COALESCE(NULLIF(project,''), '(none)') AS project, COUNT(*) AS cnt
+                        FROM memories WHERE deleted_at IS NULL
+                        GROUP BY project ORDER BY cnt DESC
+                    ),
+                    by_src AS (
+                        SELECT source, COUNT(*) AS cnt
+                        FROM memories WHERE deleted_at IS NULL
+                        GROUP BY source ORDER BY cnt DESC LIMIT 10
+                    ),
+                    sess AS (
+                        SELECT
+                            COUNT(*)                                    AS total,
+                            COUNT(*) FILTER (WHERE distilled = TRUE)    AS distilled,
+                            COUNT(*) FILTER (WHERE distill_failures >= 3) AS capped
+                        FROM imported_sessions
+                    )
+                    SELECT
+                        (SELECT total    FROM mem)      AS total_memories,
+                        (SELECT deleted  FROM mem)      AS deleted_memories,
+                        (SELECT json_agg(row_to_json(by_proj)) FROM by_proj) AS by_project,
+                        (SELECT json_agg(row_to_json(by_src))  FROM by_src)  AS by_source,
+                        (SELECT total    FROM sess)     AS sessions_total,
+                        (SELECT distilled FROM sess)    AS sessions_distilled,
+                        (SELECT capped   FROM sess)     AS sessions_capped
+                """)
+                row = cur.fetchone()
+        total, deleted, by_project_json, by_source_json, s_total, s_distilled, s_capped = row
         with _cache_lock:
             cache_size = len(_search_cache)
         return json.dumps({
             "total_memories": total,
-            "deleted_memories": total_deleted,
-            "by_project": [{"project": r[0], "count": r[1]} for r in by_project],
-            "top_sources": [{"source": r[0], "count": r[1]} for r in by_source],
+            "deleted_memories": deleted,
+            "by_project": by_project_json or [],
+            "top_sources": by_source_json or [],
             "sessions": {
-                "total": sessions_total,
-                "distilled": sessions_distilled,
-                "capped": sessions_capped,
-                "pending_distill": sessions_total - sessions_distilled - sessions_capped
+                "total": s_total,
+                "distilled": s_distilled,
+                "capped": s_capped,
+                "pending_distill": s_total - s_distilled - s_capped,
             },
             "search_cache": {
                 "entries": cache_size,
