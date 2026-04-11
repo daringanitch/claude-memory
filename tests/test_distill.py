@@ -1,6 +1,7 @@
 """Tests for distill_sessions.py — pure-logic functions only (no DB, API, or model required)."""
 import sys
 import os
+from unittest.mock import MagicMock, patch, call
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -67,3 +68,70 @@ class TestBuildTranscript:
         messages = [self._msg("short message")]
         transcript = ds.build_transcript(messages)
         assert "[transcript truncated]" not in transcript
+
+
+class TestIncrementFailures:
+    def _make_conn(self, failures_after=1):
+        conn = MagicMock()
+        cur = MagicMock()
+        cur.__enter__ = MagicMock(return_value=cur)
+        cur.__exit__ = MagicMock(return_value=False)
+        cur.fetchone.return_value = (failures_after,)
+        conn.cursor.return_value = cur
+        return conn, cur
+
+    def test_increments_counter(self):
+        conn, cur = self._make_conn(failures_after=1)
+        ds._increment_failures(conn, "session-abc", "session-a")
+        cur.execute.assert_called_once()
+        sql = cur.execute.call_args[0][0]
+        assert "distill_failures" in sql
+        assert "distill_failures + 1" in sql
+        conn.commit.assert_called_once()
+
+    def test_warns_when_cap_reached(self):
+        conn, cur = self._make_conn(failures_after=ds.DISTILL_FAILURE_CAP)
+        with patch.object(ds.log, "warning") as mock_warn:
+            ds._increment_failures(conn, "session-abc", "session-a")
+        mock_warn.assert_called_once()
+        msg = mock_warn.call_args[0][0]
+        assert "cap" in msg.lower() or "skip" in msg.lower()
+
+    def test_no_warning_below_cap(self):
+        conn, cur = self._make_conn(failures_after=ds.DISTILL_FAILURE_CAP - 1)
+        with patch.object(ds.log, "warning") as mock_warn:
+            ds._increment_failures(conn, "session-abc", "session-a")
+        mock_warn.assert_not_called()
+
+    def test_handles_db_error_gracefully(self):
+        conn = MagicMock()
+        conn.cursor.side_effect = Exception("db error")
+        # Should not raise
+        ds._increment_failures(conn, "session-abc", "session-a")
+        conn.rollback.assert_called_once()
+
+
+class TestGetPendingSessionsFiltersCapped:
+    def test_query_excludes_capped_sessions(self):
+        conn = MagicMock()
+        cur = MagicMock()
+        cur.__enter__ = MagicMock(return_value=cur)
+        cur.__exit__ = MagicMock(return_value=False)
+        cur.fetchall.return_value = []
+        conn.cursor.return_value = cur
+        ds.get_pending_sessions(conn)
+        sql = cur.execute.call_args[0][0]
+        assert "distill_failures" in sql
+        assert "distilled = FALSE" in sql
+
+    def test_query_filters_capped_with_project(self):
+        conn = MagicMock()
+        cur = MagicMock()
+        cur.__enter__ = MagicMock(return_value=cur)
+        cur.__exit__ = MagicMock(return_value=False)
+        cur.fetchall.return_value = []
+        conn.cursor.return_value = cur
+        ds.get_pending_sessions(conn, project_filter="myproject")
+        sql = cur.execute.call_args[0][0]
+        assert "distill_failures" in sql
+        assert "ILIKE" in sql
