@@ -7,9 +7,9 @@ Persistent vector memory for Claude Code. Stores your Claude sessions, notes, an
 Two Docker containers:
 
 - **PostgreSQL 16 + pgvector** — stores memories as text + 768-dimensional embeddings
-- **FastMCP server (port 3333)** — exposes 11 tools to Claude via the MCP protocol over SSE
+- **FastMCP server (port 3333)** — exposes 15 tools to Claude via the MCP protocol over SSE
 
-When registered as an MCP server, Claude can search your memory by meaning (`semantic_search`), keyword (`search_memories`), or tag (`list_memories`) — and save new memories automatically during a session. A connection pool keeps 1–5 persistent DB connections so tool calls are fast.
+When registered as an MCP server, Claude can search your memory by meaning (`semantic_search`), keyword (`search_memories`), combined score (`hybrid_search`), or tag (`list_memories`) — and save new memories automatically during a session. A connection pool keeps 1–5 persistent DB connections so tool calls are fast.
 
 ## Quick start
 
@@ -77,6 +77,8 @@ docker compose run --rm -T \
 
 Raw imported messages are verbose. `distill_sessions.py` uses a local Ollama LLM to extract durable knowledge — decisions, patterns, bug root causes — and replaces raw messages with concise, searchable memories. No API key required.
 
+Sessions that fail distillation 3 times are automatically skipped (failure cap), preventing a broken session from blocking the queue indefinitely.
+
 **Ollama setup (one-time):**
 ```bash
 brew install ollama
@@ -133,27 +135,37 @@ bash restore.sh backups/claude-memory-2026-03-08T12-00-00.pgdump
 | Tool | Key Parameters | Description |
 |------|---------------|-------------|
 | `save_memory` | `content`, `tags[]`, `source`, `project` | Save a note; auto-deduplicates at ≥0.92 cosine similarity |
+| `check_memory` | `content` | Check if content would be saved, updated, or skipped — without writing |
 | `semantic_search` | `query`, `limit`, `min_similarity`, `project`, `since`, `before` | Search by **meaning** using vector cosine similarity |
 | `search_memories` | `query`, `limit`, `project`, `since`, `before` | Search by **keyword** using PostgreSQL full-text search |
-| `list_memories` | `limit`, `tag`, `project`, `since`, `before` | List recent memories, optionally filtered |
-| `get_memory` | `memory_id` | Fetch a single memory by ID with full content |
-| `recent_context` | `project`, `limit` | Recent distilled memories — use at session start for context recall |
-| `update_memory` | `memory_id`, `content`, `tags[]` | Update content or tags (re-embeds automatically if content changes) |
-| `delete_memory` | `memory_id` | Delete a memory by ID |
-| `list_tags` | — | List all tags with occurrence counts |
-| `get_stats` | — | Memory counts by project/source, session import and distill status |
+| `hybrid_search` | `query`, `limit`, `keyword_weight`, `semantic_weight`, `project`, `since`, `before` | Combined keyword + semantic search with configurable weights (default 0.7/0.3) |
+| `list_memories` | `limit`, `offset`, `tag`, `project`, `since`, `before` | List memories with pagination; returns `{total, limit, offset, memories[]}` |
+| `get_memory` | `memory_id` | Fetch a single memory by ID; returns soft-deleted rows too (`deleted_at` will be set) |
+| `recent_context` | `project`, `limit` | Recent distilled memories for session-start recall; falls back to recent active memories if nothing distilled yet |
+| `update_memory` | `memory_id`, `content`, `tags[]`, `force` | Update content or tags (re-embeds automatically); warns on near-duplicate unless `force=True` |
+| `delete_memory` | `memory_id` | Soft-delete a memory (hidden but recoverable via `restore_memory`) |
+| `restore_memory` | `memory_id` | Restore a soft-deleted memory |
+| `purge_memory` | `memory_id` | Permanently delete — must soft-delete first (two-step safety gate) |
+| `list_tags` | — | List all tags with occurrence counts (active memories only) |
+| `get_stats` | — | Memory counts by project/source, soft-deleted count, session distill status, search cache stats |
 | `export_memories` | `project`, `tag`, `since`, `before`, `output_format` | Export memories as JSON or markdown |
 
 `since` and `before` accept ISO date strings: `"2026-01-01"` or `"2026-01-01T12:00:00"`.
+
+### HTTP endpoints
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /health` | Liveness/readiness probe — returns `{"status":"ok"}` (200) or `{"status":"degraded"}` (503) |
 
 ## Tests
 
 ```bash
 brew install pytest   # one-time
-pytest tests/ -v      # 37 tests, no Docker or GPU required
+pytest tests/ -v      # 63 tests, no Docker or GPU required
 ```
 
-All heavy dependencies (sentence-transformers, psycopg2, openai) are mocked by `tests/conftest.py`.
+All heavy dependencies (sentence-transformers, psycopg2, openai, starlette) are mocked by `tests/conftest.py`.
 
 ## Global Claude Code integration
 
@@ -174,26 +186,43 @@ with descriptive tags like ["project:name", "type:decision|bug|preference|patter
 
 ```sql
 CREATE TABLE memories (
-  id         SERIAL PRIMARY KEY,
-  content    TEXT         NOT NULL,
-  tags       TEXT[]       DEFAULT '{}',
-  source     VARCHAR(100) DEFAULT 'claude-code',
-  project    VARCHAR(100) DEFAULT '',
-  embedding  vector(768),
-  created_at TIMESTAMP    DEFAULT NOW(),
-  updated_at TIMESTAMP    DEFAULT NOW()
+  id           SERIAL PRIMARY KEY,
+  content      TEXT         NOT NULL,
+  content_hash TEXT GENERATED ALWAYS AS (md5(content)) STORED UNIQUE,
+  tags         TEXT[]       DEFAULT '{}',
+  source       VARCHAR(100) DEFAULT 'claude-code',
+  project      VARCHAR(100) DEFAULT '',
+  embedding    vector(768),
+  created_at   TIMESTAMP    DEFAULT NOW(),
+  updated_at   TIMESTAMP    DEFAULT NOW(),
+  deleted_at   TIMESTAMP    DEFAULT NULL   -- NULL = active, non-NULL = soft-deleted
 );
 
 CREATE TABLE imported_sessions (
-  session_id    VARCHAR(100) PRIMARY KEY,
-  project       VARCHAR(100) DEFAULT '',
-  imported_at   TIMESTAMP    DEFAULT NOW(),
-  message_count INT          DEFAULT 0,
-  distilled     BOOLEAN      DEFAULT FALSE
+  session_id       VARCHAR(100) PRIMARY KEY,
+  project          VARCHAR(100) DEFAULT '',
+  imported_at      TIMESTAMP    DEFAULT NOW(),
+  message_count    INT          DEFAULT 0,
+  distilled        BOOLEAN      DEFAULT FALSE,
+  distill_failures INT          DEFAULT 0   -- sessions capped at 3 failures are skipped
 );
 ```
 
-Indexes: IVFFlat for vector cosine search, GIN for tag arrays and full-text search, BTREE on `created_at` and `project`.
+Indexes: IVFFlat for vector cosine search, GIN for tag arrays and full-text search, BTREE on `created_at`, `project`, and a partial index on `deleted_at IS NULL` for fast active-row queries.
+
+### Migrations
+
+Run these against an existing installation to apply schema changes:
+
+```bash
+# Migration 002: soft deletes (deleted_at column)
+docker exec -i claude-memory-db-1 psql -U claude -d memory < migrations/002_soft_deletes.sql
+
+# Migration 003: distillation failure cap (distill_failures column)
+docker exec -i claude-memory-db-1 psql -U claude -d memory < migrations/003_distill_failure_cap.sql
+```
+
+Fresh installs via `init.sql` include all columns automatically.
 
 ## Configuration
 
@@ -206,6 +235,8 @@ Indexes: IVFFlat for vector cosine search, GIN for tag arrays and full-text sear
 | `OLLAMA_URL` | `http://localhost:11434/v1` (use `http://host.docker.internal:11434/v1` inside Docker) |
 | `DISTILL_MODEL` | `qwen2.5:7b` |
 | `DISTILL_WORKERS` | `4` |
+| `CACHE_MAX_SIZE` | `500` (search result cache entries) |
+| `CACHE_TTL_SECONDS` | `600` (10 min search cache TTL) |
 
 Data is persisted to `./data/postgres/`. The HuggingFace model cache is stored in a named Docker volume (`model_cache`) so `all-mpnet-base-v2` isn't re-downloaded on restart.
 
