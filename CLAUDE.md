@@ -70,12 +70,20 @@ The script reads `DATABASE_URL` from environment (default: `postgresql://claude:
 | `semantic_search` | `query`, `limit`, `min_similarity`, `project` | Vector similarity search |
 | `search_memories` | `query`, `limit`, `project` | Full-text keyword search |
 | `list_memories` | `limit`, `tag`, `project` | List recent memories, optionally filtered |
-| `get_memory` | `memory_id` | Fetch a single memory by ID with full content |
+| `get_memory` | `memory_id` | Fetch a single memory by ID (includes deleted_at so you can see soft-deleted rows) |
 | `recent_context` | `project`, `limit` | Recent distilled memories — use at session start for context recall |
-| `update_memory` | `memory_id`, `content`, `tags[]` | Update and re-embed a memory |
-| `delete_memory` | `memory_id` | Delete by ID |
-| `list_tags` | — | All unique tags with counts |
-| `get_stats` | — | Memory counts by project/source, session import status |
+| `update_memory` | `memory_id`, `content`, `tags[]`, `force` | Update and re-embed; warns on near-duplicate unless force=True |
+| `delete_memory` | `memory_id` | Soft-delete (hidden, recoverable via restore_memory) |
+| `restore_memory` | `memory_id` | Restore a soft-deleted memory |
+| `purge_memory` | `memory_id` | Permanently delete (must soft-delete first — two-step safety gate) |
+| `list_tags` | — | All unique tags with counts (active memories only) |
+| `get_stats` | — | Memory counts by project/source, deleted count, session import status |
+
+### HTTP Endpoints
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /health` | Liveness probe — returns `{"status":"ok"}` (200) or `{"status":"degraded"}` (503) |
 
 ## Configuration
 
