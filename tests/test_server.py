@@ -476,3 +476,98 @@ class TestSemanticSearchCache:
             mock_db.return_value.__exit__ = MagicMock(return_value=False)
             server.delete_memory(1)
         assert len(server._search_cache) == 0
+
+
+class TestFindDuplicates:
+    def _make_conn(self, rows):
+        conn = MagicMock()
+        cur = MagicMock()
+        cur.__enter__ = MagicMock(return_value=cur)
+        cur.__exit__ = MagicMock(return_value=False)
+        cur.fetchall.return_value = rows
+        conn.cursor.return_value = cur
+        conn.__enter__ = MagicMock(return_value=conn)
+        conn.__exit__ = MagicMock(return_value=False)
+        return conn
+
+    def test_invalid_threshold_too_low(self):
+        result = server.find_duplicates(threshold=0.3)
+        assert "❌" in result
+
+    def test_invalid_threshold_too_high(self):
+        result = server.find_duplicates(threshold=1.1)
+        assert "❌" in result
+
+    def test_no_duplicates_returns_message(self):
+        conn = self._make_conn([])
+        with patch("server.db_conn") as mock_db:
+            mock_db.return_value.__enter__ = MagicMock(return_value=conn)
+            mock_db.return_value.__exit__ = MagicMock(return_value=False)
+            result = server.find_duplicates()
+        assert "No duplicate pairs" in result
+
+    def test_returns_pairs_as_json(self):
+        row = {
+            "id_a": 1, "id_b": 2, "similarity": 0.92,
+            "content_a": "hello world", "content_b": "hello world!",
+            "created_a": datetime(2026, 1, 1), "created_b": datetime(2026, 1, 2),
+        }
+        conn = self._make_conn([row])
+        with patch("server.db_conn") as mock_db:
+            mock_db.return_value.__enter__ = MagicMock(return_value=conn)
+            mock_db.return_value.__exit__ = MagicMock(return_value=False)
+            result = server.find_duplicates(threshold=0.85)
+        data = json.loads(result)
+        assert len(data) == 1
+        assert data[0]["id_a"] == 1
+        assert data[0]["id_b"] == 2
+        assert data[0]["similarity"] == 0.92
+
+
+class TestBulkDelete:
+    def _make_conn(self, total=0, preview_rows=None):
+        conn = MagicMock()
+        cur = MagicMock()
+        cur.__enter__ = MagicMock(return_value=cur)
+        cur.__exit__ = MagicMock(return_value=False)
+        cur.fetchall.return_value = preview_rows or []
+        cur.fetchone.return_value = {"count": total}
+        conn.cursor.return_value = cur
+        conn.__enter__ = MagicMock(return_value=conn)
+        conn.__exit__ = MagicMock(return_value=False)
+        return conn
+
+    def test_no_filters_returns_error(self):
+        result = server.bulk_delete()
+        assert "❌" in result
+
+    def test_dry_run_does_not_commit(self):
+        conn = self._make_conn(total=3)
+        with patch("server.db_conn") as mock_db:
+            mock_db.return_value.__enter__ = MagicMock(return_value=conn)
+            mock_db.return_value.__exit__ = MagicMock(return_value=False)
+            result = server.bulk_delete(tag="old", dry_run=True)
+        conn.commit.assert_not_called()
+        data = json.loads(result)
+        assert data["total"] == 3
+        assert "dry_run" in data["action"].lower()
+
+    def test_dry_run_false_commits(self):
+        conn = self._make_conn(total=2)
+        with patch("server.db_conn") as mock_db:
+            mock_db.return_value.__enter__ = MagicMock(return_value=conn)
+            mock_db.return_value.__exit__ = MagicMock(return_value=False)
+            result = server.bulk_delete(project="old-project", dry_run=False)
+        conn.commit.assert_called_once()
+        data = json.loads(result)
+        assert data["total"] == 2
+        assert "Deleted" in data["action"]
+
+    def test_zero_matches_dry_run(self):
+        conn = self._make_conn(total=0)
+        with patch("server.db_conn") as mock_db:
+            mock_db.return_value.__enter__ = MagicMock(return_value=conn)
+            mock_db.return_value.__exit__ = MagicMock(return_value=False)
+            result = server.bulk_delete(tag="nonexistent", dry_run=True)
+        data = json.loads(result)
+        assert data["total"] == 0

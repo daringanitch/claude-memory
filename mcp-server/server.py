@@ -728,5 +728,108 @@ def export_memories(project: str = None, tag: str = None, since: str = None,
         return f"❌ Error: {e}"
 
 
+@mcp.tool()
+def find_duplicates(threshold: float = 0.85, limit: int = 20, project: str = None) -> str:
+    """Find near-duplicate memory pairs above a similarity threshold.
+    Returns pairs ordered by similarity descending — useful for database hygiene after bulk imports.
+    threshold: minimum cosine similarity to report (default 0.85; must be between 0.5 and 1.0)
+    limit: max number of pairs to return (default 20)"""
+    if not (0.5 <= threshold <= 1.0):
+        return "❌ threshold must be between 0.5 and 1.0"
+
+    try:
+        with db_conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                project_cond = "AND a.project = %s AND b.project = %s" if project else ""
+                project_params = [project, project] if project else []
+                cur.execute(
+                    f"""
+                    SELECT
+                        a.id   AS id_a,
+                        b.id   AS id_b,
+                        ROUND((1 - (a.embedding <=> b.embedding))::numeric, 4) AS similarity,
+                        LEFT(a.content, 120) AS content_a,
+                        LEFT(b.content, 120) AS content_b,
+                        a.created_at AS created_a,
+                        b.created_at AS created_b
+                    FROM memories a
+                    JOIN memories b ON b.id > a.id
+                    WHERE a.deleted_at IS NULL
+                      AND b.deleted_at IS NULL
+                      AND a.embedding IS NOT NULL
+                      AND b.embedding IS NOT NULL
+                      AND (1 - (a.embedding <=> b.embedding)) >= %s
+                      {project_cond}
+                    ORDER BY similarity DESC
+                    LIMIT %s
+                    """,
+                    [threshold] + project_params + [limit]
+                )
+                rows = cur.fetchall()
+        if not rows:
+            return f"No duplicate pairs found above similarity {threshold}."
+        return json.dumps([dict(r) for r in rows], indent=2, default=str)
+    except Exception as e:
+        log.error("find_duplicates failed: %s", e)
+        return f"❌ Error: {e}"
+
+
+@mcp.tool()
+def bulk_delete(tag: str = None, project: str = None, source: str = None,
+                dry_run: bool = True) -> str:
+    """Soft-delete multiple memories matching ALL supplied filters (tag, project, source).
+    At least one filter is required. Defaults to dry_run=True — set dry_run=False to apply.
+    Returns the count and a preview of affected memories."""
+    if not any([tag, project, source]):
+        return "❌ Provide at least one filter: tag, project, or source"
+
+    conditions = ["deleted_at IS NULL"]
+    params: list = []
+    if tag:
+        conditions.append("%s = ANY(tags)")
+        params.append(tag)
+    if project:
+        conditions.append("project = %s")
+        params.append(project)
+    if source:
+        conditions.append("source = %s")
+        params.append(source)
+    where = " AND ".join(conditions)
+
+    try:
+        with db_conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    f"SELECT id, LEFT(content, 80) AS preview, tags, project, source "
+                    f"FROM memories WHERE {where} ORDER BY created_at DESC LIMIT 50",
+                    params
+                )
+                preview_rows = cur.fetchall()
+                cur.execute(f"SELECT COUNT(*) FROM memories WHERE {where}", params)
+                total = cur.fetchone()["count"]
+
+            if not dry_run and total > 0:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"UPDATE memories SET deleted_at = NOW() WHERE {where}",
+                        params
+                    )
+                conn.commit()
+                _cache_invalidate()
+                log.info("bulk_delete: soft-deleted %d memories tag=%s project=%s source=%s",
+                         total, tag, project, source)
+
+        action = "Would delete" if dry_run else "Deleted"
+        note = " (dry_run=True — pass dry_run=False to apply)" if dry_run else ""
+        return json.dumps({
+            "action": action + note,
+            "total": total,
+            "preview": [dict(r) for r in preview_rows],
+        }, indent=2, default=str)
+    except Exception as e:
+        log.error("bulk_delete failed: %s", e)
+        return f"❌ Error: {e}"
+
+
 if __name__ == "__main__":
     mcp.run(transport="sse")
