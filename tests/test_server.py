@@ -284,3 +284,161 @@ class TestHybridSearch:
             result = server.hybrid_search("pure keyword match", keyword_weight=1.0, semantic_weight=0.0)
         data = json.loads(result)
         assert data[0]["id"] == 2
+
+
+# ── Search cache tests ────────────────────────────────────────────────────────
+
+class TestCacheHelpers:
+    def setup_method(self):
+        """Clear cache before each test."""
+        server._cache_invalidate()
+
+    def test_cache_miss_returns_none(self):
+        assert server._cache_get(("semantic", "query", 10, 0.3, "", "", "")) is None
+
+    def test_cache_set_and_get(self):
+        key = ("semantic", "test query", 10, 0.3, "", "", "")
+        server._cache_set(key, '["result"]')
+        assert server._cache_get(key) == '["result"]'
+
+    def test_cache_get_returns_none_after_invalidate(self):
+        key = ("keyword", "hello", 10, "", "", "")
+        server._cache_set(key, "result")
+        server._cache_invalidate()
+        assert server._cache_get(key) is None
+
+    def test_cache_ttl_expiry(self):
+        import time as _time
+        key = ("semantic", "expiring", 10, 0.3, "", "", "")
+        with patch("server.time") as mock_time:
+            mock_time.monotonic.return_value = 0.0
+            server._cache_set(key, "old result")
+            # Advance time past TTL
+            mock_time.monotonic.return_value = server.CACHE_TTL_SECONDS + 1
+            result = server._cache_get(key)
+        assert result is None
+
+    def test_cache_lru_eviction_at_max_size(self):
+        old_max = server.CACHE_MAX_SIZE
+        try:
+            server.CACHE_MAX_SIZE = 3
+            for i in range(4):
+                server._cache_set((f"key{i}",), f"val{i}")
+            # key0 (oldest) should be evicted
+            assert server._cache_get(("key0",)) is None
+            assert server._cache_get(("key3",)) == "val3"
+        finally:
+            server.CACHE_MAX_SIZE = old_max
+
+    def test_cache_move_to_end_on_hit(self):
+        """Accessing an entry should protect it from LRU eviction."""
+        old_max = server.CACHE_MAX_SIZE
+        try:
+            server.CACHE_MAX_SIZE = 3
+            for i in range(3):
+                server._cache_set((f"key{i}",), f"val{i}")
+            # Access key0 to make it recently used
+            server._cache_get(("key0",))
+            # Add one more to trigger eviction — key1 should be evicted, not key0
+            server._cache_set(("key3",), "val3")
+            assert server._cache_get(("key0",)) == "val0"
+            assert server._cache_get(("key1",)) is None
+        finally:
+            server.CACHE_MAX_SIZE = old_max
+
+
+class TestSemanticSearchCache:
+    def setup_method(self):
+        server._cache_invalidate()
+
+    def _make_search_conn(self, rows):
+        conn = MagicMock()
+        cur = MagicMock()
+        cur.__enter__ = MagicMock(return_value=cur)
+        cur.__exit__ = MagicMock(return_value=False)
+        cur.fetchall.return_value = rows
+        conn.cursor.return_value = cur
+        conn.__enter__ = MagicMock(return_value=conn)
+        conn.__exit__ = MagicMock(return_value=False)
+        return conn, cur
+
+    def test_cache_miss_calls_db(self):
+        row = {"id": 1, "content": "test", "tags": [], "source": "x",
+               "project": "", "created_at": datetime(2026, 1, 1), "similarity": 0.85}
+        conn, cur = self._make_search_conn([row])
+        with patch("server.db_conn") as mock_db:
+            mock_db.return_value.__enter__ = MagicMock(return_value=conn)
+            mock_db.return_value.__exit__ = MagicMock(return_value=False)
+            server.semantic_search("test query")
+        cur.execute.assert_called_once()
+
+    def test_cache_hit_skips_embed_and_db(self):
+        row = {"id": 1, "content": "test", "tags": [], "source": "x",
+               "project": "", "created_at": datetime(2026, 1, 1), "similarity": 0.85}
+        conn, cur = self._make_search_conn([row])
+        with patch("server.db_conn") as mock_db, patch("server.embed") as mock_embed:
+            mock_db.return_value.__enter__ = MagicMock(return_value=conn)
+            mock_db.return_value.__exit__ = MagicMock(return_value=False)
+            mock_embed.return_value = [0.0] * 768
+            # First call — cache miss
+            result1 = server.semantic_search("cached query")
+            # Second call — should hit cache
+            result2 = server.semantic_search("cached query")
+        assert result1 == result2
+        assert mock_embed.call_count == 1   # embedded only once
+        assert cur.execute.call_count == 1  # DB queried only once
+
+    def test_different_queries_cached_separately(self):
+        conn, cur = self._make_search_conn([])
+        with patch("server.db_conn") as mock_db:
+            mock_db.return_value.__enter__ = MagicMock(return_value=conn)
+            mock_db.return_value.__exit__ = MagicMock(return_value=False)
+            server.semantic_search("query A")
+            server.semantic_search("query B")
+        assert cur.execute.call_count == 2
+
+    def test_cache_invalidated_after_save(self):
+        # Prime the cache
+        conn_search, cur_search = self._make_search_conn([])
+        with patch("server.db_conn") as mock_db:
+            mock_db.return_value.__enter__ = MagicMock(return_value=conn_search)
+            mock_db.return_value.__exit__ = MagicMock(return_value=False)
+            server.semantic_search("some query")
+        assert len(server._search_cache) == 1
+
+        # Now save a memory — cache should be cleared
+        conn_write = MagicMock()
+        cur_write = MagicMock()
+        cur_write.__enter__ = MagicMock(return_value=cur_write)
+        cur_write.__exit__ = MagicMock(return_value=False)
+        cur_write.fetchone.side_effect = [None, {"id": 1, "created_at": datetime(2026, 1, 1), "deleted_at": None}]
+        conn_write.cursor.return_value = cur_write
+        conn_write.__enter__ = MagicMock(return_value=conn_write)
+        conn_write.__exit__ = MagicMock(return_value=False)
+        with patch("server.db_conn") as mock_db:
+            mock_db.return_value.__enter__ = MagicMock(return_value=conn_write)
+            mock_db.return_value.__exit__ = MagicMock(return_value=False)
+            server.save_memory("new memory")
+        assert len(server._search_cache) == 0
+
+    def test_cache_invalidated_after_delete(self):
+        conn_search, _ = self._make_search_conn([])
+        with patch("server.db_conn") as mock_db:
+            mock_db.return_value.__enter__ = MagicMock(return_value=conn_search)
+            mock_db.return_value.__exit__ = MagicMock(return_value=False)
+            server.semantic_search("some query")
+        assert len(server._search_cache) == 1
+
+        conn_write = MagicMock()
+        cur_write = MagicMock()
+        cur_write.__enter__ = MagicMock(return_value=cur_write)
+        cur_write.__exit__ = MagicMock(return_value=False)
+        cur_write.rowcount = 1
+        conn_write.cursor.return_value = cur_write
+        conn_write.__enter__ = MagicMock(return_value=conn_write)
+        conn_write.__exit__ = MagicMock(return_value=False)
+        with patch("server.db_conn") as mock_db:
+            mock_db.return_value.__enter__ = MagicMock(return_value=conn_write)
+            mock_db.return_value.__exit__ = MagicMock(return_value=False)
+            server.delete_memory(1)
+        assert len(server._search_cache) == 0
