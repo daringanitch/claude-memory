@@ -18,6 +18,10 @@ log = logging.getLogger("claude-memory")
 
 mcp = FastMCP("claude-memory", host="0.0.0.0", port=3333)
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://claude:memory_pass@localhost:5432/memory")
+
+# ── Write Guard thresholds ─────────────────────────────────────────────────────
+GUARD_NOOP_THRESHOLD   = 0.92   # similarity >= this → near-duplicate, block save
+GUARD_UPDATE_THRESHOLD = 0.75   # similarity >= this (and < NOOP) → suggest update
 log.info("Loading embedding model...")
 embedder = SentenceTransformer("all-mpnet-base-v2")
 log.info("Connecting to database...")
@@ -43,6 +47,70 @@ def db_conn():
 
 def embed(text):
     return embedder.encode(text, normalize_embeddings=True)
+
+
+def _write_guard(content: str, vector) -> dict:
+    """Two-phase write guard. Checks for similar existing memories and returns a decision.
+    Returns a dict with keys: action, method, reason, target_id, target_preview, similarity.
+    action is one of: ADD (safe to save), UPDATE (similar exists — update instead), NOOP (duplicate).
+    Fails open on DB error so saves are never silently dropped.
+    """
+    try:
+        with db_conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    "SELECT id, content, "
+                    "ROUND((1 - (embedding <=> %s))::numeric, 4) AS sim "
+                    "FROM memories "
+                    "WHERE (1 - (embedding <=> %s)) >= %s "
+                    "AND deleted_at IS NULL "
+                    "ORDER BY embedding <=> %s LIMIT 1",
+                    (vector, vector, GUARD_UPDATE_THRESHOLD, vector),
+                )
+                row = cur.fetchone()
+    except Exception as e:
+        log.error("_write_guard DB query failed: %s", e)
+        return {
+            "action": "ADD",
+            "method": "none",
+            "reason": f"Guard DB error (failing open): {e}",
+            "target_id": None,
+            "target_preview": None,
+            "similarity": None,
+        }
+
+    if row is None:
+        return {
+            "action": "ADD",
+            "method": "none",
+            "reason": "No similar memory found above update threshold.",
+            "target_id": None,
+            "target_preview": None,
+            "similarity": None,
+        }
+
+    sim = float(row["sim"])
+    target_id = row["id"]
+    target_preview = row["content"][:120]
+
+    if sim >= GUARD_NOOP_THRESHOLD:
+        return {
+            "action": "NOOP",
+            "method": "semantic",
+            "reason": f"Near-identical memory already exists (similarity {sim}).",
+            "target_id": target_id,
+            "target_preview": target_preview,
+            "similarity": sim,
+        }
+
+    return {
+        "action": "UPDATE",
+        "method": "semantic",
+        "reason": f"Similar memory found (similarity {sim}). Consider updating it instead.",
+        "target_id": target_id,
+        "target_preview": target_preview,
+        "similarity": sim,
+    }
 
 
 def _parse_dt(value: str, name: str):
@@ -83,22 +151,52 @@ async def health_check(request: Request) -> JSONResponse:
 # ── MCP tools ─────────────────────────────────────────────────────────────────
 
 @mcp.tool()
-def save_memory(content: str, tags: list[str] = [], source: str = "claude-code", project: str = "") -> str:
-    """Save a thought, request, note, or piece of information to persistent memory."""
+def check_memory(content: str) -> str:
+    """Run the write guard check without saving anything.
+    Returns a JSON decision with keys: action, method, reason, target_id, target_preview, similarity.
+    action values: ADD (safe to save), UPDATE (similar memory exists — call update_memory on
+    target_id instead), NOOP (near-duplicate — do not save)."""
     vector = embed(content)
+    decision = _write_guard(content, vector)
+    return json.dumps(decision, indent=2)
+
+
+@mcp.tool()
+def save_memory(content: str, tags: list[str] = [], source: str = "claude-code",
+                project: str = "", guard: bool = True) -> str:
+    """Save a thought, request, note, or piece of information to persistent memory.
+    The write guard (guard=True by default) blocks near-duplicates and suggests updates
+    for similar existing memories. Pass guard=False to force-save regardless."""
+    vector = embed(content)
+    if guard:
+        decision = _write_guard(content, vector)
+        if decision["action"] == "NOOP":
+            return json.dumps({
+                "blocked": True,
+                "reason": "duplicate",
+                "decision": decision,
+                "message": (
+                    f"Duplicate of memory ID {decision['target_id']} "
+                    f"(similarity {decision['similarity']}): "
+                    f"{decision['target_preview']}..."
+                ),
+            })
+        if decision["action"] == "UPDATE":
+            return json.dumps({
+                "blocked": True,
+                "reason": "similar_exists",
+                "decision": decision,
+                "message": (
+                    f"Similar memory ID {decision['target_id']} exists "
+                    f"(similarity {decision['similarity']}). "
+                    f"Call update_memory(memory_id={decision['target_id']}, content=...) "
+                    f"to merge, or save_memory(..., guard=False) to force-add. "
+                    f"Preview: {decision['target_preview']}..."
+                ),
+            })
     try:
         with db_conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                # Semantic dedup check — only against active (non-deleted) memories
-                cur.execute(
-                    "SELECT id, content, ROUND((1 - (embedding <=> %s))::numeric, 4) AS sim "
-                    "FROM memories WHERE (1 - (embedding <=> %s)) >= 0.92 AND deleted_at IS NULL "
-                    "ORDER BY embedding <=> %s LIMIT 1",
-                    (vector, vector, vector)
-                )
-                dup = cur.fetchone()
-                if dup:
-                    return f"Duplicate of memory ID {dup['id']} (similarity {dup['sim']}): {dup['content'][:80]}..."
                 # ON CONFLICT on content_hash handles exact-duplicate races atomically.
                 # If the conflicting row was soft-deleted, un-delete it (restore).
                 # If it's an active row the DO UPDATE WHERE is false → RETURNING returns nothing.
