@@ -36,6 +36,7 @@ OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/v1")
 DEFAULT_MODEL = os.environ.get("DISTILL_MODEL", "qwen2.5:7b")
 DEFAULT_WORKERS = int(os.environ.get("DISTILL_WORKERS", "4"))
 MAX_TRANSCRIPT_CHARS = 80_000  # ~20k tokens
+DISTILL_FAILURE_CAP = 3       # sessions that fail this many times are permanently skipped
 
 DISTILL_PROMPT = """\
 You are extracting durable knowledge from a Claude Code session transcript.
@@ -82,14 +83,15 @@ def get_pending_sessions(conn, project_filter=None):
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         if project_filter:
             cur.execute(
-                "SELECT session_id, project, message_count FROM imported_sessions "
-                "WHERE distilled = FALSE AND project ILIKE %s ORDER BY imported_at",
-                (f"%{project_filter}%",)
+                "SELECT session_id, project, message_count, distill_failures FROM imported_sessions "
+                "WHERE distilled = FALSE AND distill_failures < %s AND project ILIKE %s ORDER BY imported_at",
+                (DISTILL_FAILURE_CAP, f"%{project_filter}%",)
             )
         else:
             cur.execute(
-                "SELECT session_id, project, message_count FROM imported_sessions "
-                "WHERE distilled = FALSE ORDER BY imported_at"
+                "SELECT session_id, project, message_count, distill_failures FROM imported_sessions "
+                "WHERE distilled = FALSE AND distill_failures < %s ORDER BY imported_at",
+                (DISTILL_FAILURE_CAP,)
             )
         return cur.fetchall()
 
@@ -130,6 +132,27 @@ def parse_distilled(response_text):
     return json.loads(text[start:end + 1])
 
 
+def _increment_failures(conn, session_id, session_prefix):
+    """Increment distill_failures counter. Warns when the cap is reached."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE imported_sessions SET distill_failures = distill_failures + 1 "
+                "WHERE session_id = %s RETURNING distill_failures",
+                (session_id,)
+            )
+            row = cur.fetchone()
+        conn.commit()
+        if row and row[0] >= DISTILL_FAILURE_CAP:
+            log.warning(
+                "  [%s] Failure cap reached (%d/%d) — session will be permanently skipped",
+                session_prefix, row[0], DISTILL_FAILURE_CAP,
+            )
+    except Exception as e:
+        log.error("  [%s] Failed to increment distill_failures: %s", session_prefix, e)
+        conn.rollback()
+
+
 def distill_session(embedder, client, model, session, dry_run=False):
     """Process one session. Opens its own DB connection for thread safety."""
     session_id = session["session_id"]
@@ -159,9 +182,11 @@ def distill_session(embedder, client, model, session, dry_run=False):
             memories = parse_distilled(response)
         except json.JSONDecodeError as e:
             log.error("  [%s] JSON parse error: %s — keeping raws", session_prefix, e)
+            _increment_failures(conn, session_id, session_prefix)
             return 0
         except Exception as e:
             log.error("  [%s] LLM error: %s — keeping raws", session_prefix, e)
+            _increment_failures(conn, session_id, session_prefix)
             return 0
 
         log.info("  [%s] → %d memories extracted", session_prefix, len(memories))
