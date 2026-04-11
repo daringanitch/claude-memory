@@ -113,18 +113,52 @@ class TestSemanticSearch:
 
 
 class TestListMemories:
-    def test_empty_returns_placeholder(self):
+    def _make_conn(self, total=0, rows=None):
         conn = MagicMock()
         cur = MagicMock()
         cur.__enter__ = MagicMock(return_value=cur)
         cur.__exit__ = MagicMock(return_value=False)
-        cur.fetchall.return_value = []
+        # fetchone returns total count, fetchall returns page rows
+        cur.fetchone.return_value = {"count": total}
+        cur.fetchall.return_value = rows or []
         conn.cursor.return_value = cur
+        conn.__enter__ = MagicMock(return_value=conn)
+        conn.__exit__ = MagicMock(return_value=False)
+        return conn
+
+    def test_empty_returns_placeholder(self):
+        conn = self._make_conn(total=0, rows=[])
         with patch("server.db_conn") as mock_db:
             mock_db.return_value.__enter__ = MagicMock(return_value=conn)
             mock_db.return_value.__exit__ = MagicMock(return_value=False)
             result = server.list_memories()
         assert "No memories" in result
+
+    def test_returns_total_and_memories(self):
+        row = {"id": 1, "content": "hello", "tags": [], "source": "x",
+               "project": "", "created_at": datetime(2026, 1, 1)}
+        conn = self._make_conn(total=1, rows=[row])
+        with patch("server.db_conn") as mock_db:
+            mock_db.return_value.__enter__ = MagicMock(return_value=conn)
+            mock_db.return_value.__exit__ = MagicMock(return_value=False)
+            result = server.list_memories()
+        data = json.loads(result)
+        assert data["total"] == 1
+        assert len(data["memories"]) == 1
+        assert data["memories"][0]["content"] == "hello"
+        assert "offset" in data
+        assert "limit" in data
+
+    def test_pagination_offset_param(self):
+        conn = self._make_conn(total=50, rows=[])
+        with patch("server.db_conn") as mock_db:
+            mock_db.return_value.__enter__ = MagicMock(return_value=conn)
+            mock_db.return_value.__exit__ = MagicMock(return_value=False)
+            result = server.list_memories(limit=10, offset=20)
+        data = json.loads(result)
+        assert data["offset"] == 20
+        assert data["limit"] == 10
+        assert data["total"] == 50
 
     def test_invalid_since_returns_error(self):
         result = server.list_memories(since="2026-99-99")
