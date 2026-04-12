@@ -6,6 +6,7 @@ Persistent vector memory for Claude Code. Stores your Claude sessions, notes, an
 
 | Date | Feature |
 |------|---------|
+| 2026-04-12 | **`startup_context` tool** — single-call session-start snapshot combining behavioral signals and recent work; no search query needed (inspired by MemPalace layered loading) |
 | 2026-04-12 | **Behavioral signal extraction** — `extract_signals.py` parses session JSONL files without an LLM to produce preference memories from correction signals and pattern memories from tool/command/file habits |
 | 2026-04-11 | **`find_duplicates` + `bulk_delete` tools** — surface near-duplicate memory pairs and soft-delete memories in bulk by tag, project, or source |
 | 2026-04-11 | **`hybrid_search` tool** — combined keyword + semantic search with configurable weights |
@@ -21,7 +22,7 @@ Persistent vector memory for Claude Code. Stores your Claude sessions, notes, an
 Two Docker containers:
 
 - **PostgreSQL 16 + pgvector** — stores memories as text + 768-dimensional embeddings
-- **FastMCP server (port 3333)** — exposes 17 tools to Claude via the MCP protocol over SSE
+- **FastMCP server (port 3333)** — exposes 18 tools to Claude via the MCP protocol over SSE
 
 When registered as an MCP server, Claude can search your memory by meaning (`semantic_search`), keyword (`search_memories`), or hybrid scoring (`hybrid_search`) — and save new memories automatically during a session. A connection pool keeps 1–5 persistent DB connections so tool calls are fast.
 
@@ -194,6 +195,7 @@ bash restore.sh backups/claude-memory-2026-03-08T12-00-00.pgdump
 
 | Tool | Key Parameters | Description |
 |------|---------------|-------------|
+| `startup_context` | `project` | **Session-start snapshot** — behavioral signals + recent distilled memories in one compact call; no search query needed |
 | `save_memory` | `content`, `tags[]`, `source`, `project` | Save a note; auto-deduplicates at ≥0.92 cosine similarity |
 | `check_memory` | `content` | Dry-run write guard — returns ADD/UPDATE/NOOP with nearest match preview |
 | `semantic_search` | `query`, `limit`, `min_similarity`, `project`, `since`, `before` | Search by **meaning** using vector cosine similarity (cached 10 min) |
