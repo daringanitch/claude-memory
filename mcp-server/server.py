@@ -510,6 +510,85 @@ def recent_context(project: str = None, limit: int = 10) -> str:
 
 
 @mcp.tool()
+def startup_context(project: str = None) -> str:
+    """Return a compact session-start context block — call this at the start of every session.
+    Combines behavioral signals (workflow patterns, command habits, file hotspots, preferences)
+    with recent distilled memories into a single snapshot, no search query required.
+    Optionally filter by project name."""
+    try:
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        header = f"## Memory context [{project or 'all projects'}] — {today}\n"
+        sections = []
+
+        with db_conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+
+                # ── Behavioral signals ────────────────────────────────────────
+                project_cond = "AND project = %s " if project else ""
+                project_param = (project,) if project else ()
+
+                cur.execute(
+                    "SELECT content, tags FROM memories "
+                    f"WHERE 'source:signals' = ANY(tags) AND deleted_at IS NULL {project_cond}"
+                    "ORDER BY created_at DESC LIMIT 20",
+                    project_param,
+                )
+                signal_rows = cur.fetchall()
+
+                patterns = [r["content"] for r in signal_rows if "type:pattern" in (r["tags"] or [])]
+                preferences = [r["content"] for r in signal_rows if "type:preference" in (r["tags"] or [])]
+
+                if patterns:
+                    # Truncate each pattern to a single sentence for compactness
+                    compact = []
+                    for p in patterns[:3]:
+                        first_sentence = p.split(". ")[0] + "."
+                        compact.append(f"  • {first_sentence}")
+                    sections.append("**Patterns:**\n" + "\n".join(compact))
+
+                if preferences:
+                    pref_lines = [f"  • {p[:120]}" for p in preferences[:3]]
+                    sections.append("**Preferences:**\n" + "\n".join(pref_lines))
+
+                # ── Recent distilled memories ─────────────────────────────────
+                cur.execute(
+                    "SELECT content, created_at FROM memories "
+                    f"WHERE 'distilled' = ANY(tags) AND deleted_at IS NULL {project_cond}"
+                    "ORDER BY created_at DESC LIMIT 5",
+                    project_param,
+                )
+                distilled_rows = cur.fetchall()
+
+                if not distilled_rows:
+                    # Fallback: most recent active memories
+                    cur.execute(
+                        "SELECT content, created_at FROM memories "
+                        f"WHERE deleted_at IS NULL {project_cond}"
+                        "ORDER BY created_at DESC LIMIT 5",
+                        project_param,
+                    )
+                    distilled_rows = cur.fetchall()
+
+                if distilled_rows:
+                    lines = []
+                    for r in distilled_rows:
+                        text = r["content"][:120].rstrip()
+                        if len(r["content"]) > 120:
+                            text += "…"
+                        lines.append(f"  • {text}")
+                    sections.append("**Recent work:**\n" + "\n".join(lines))
+
+        if not sections:
+            return f"{header}\nNo context found for project '{project}'. Save some memories first."
+
+        return header + "\n" + "\n\n".join(sections)
+
+    except Exception as e:
+        log.error("startup_context failed: %s", e)
+        return f"❌ Error: {e}"
+
+
+@mcp.tool()
 def update_memory(memory_id: int, content: str = None, tags: list[str] = None, force: bool = False) -> str:
     """Update content and/or tags. Re-embeds if content changes.
     Returns a warning (without saving) if new content is ≥0.92 similar to an existing memory.
