@@ -2,6 +2,20 @@
 
 Persistent vector memory for Claude Code. Stores your Claude sessions, notes, and conversations in a local PostgreSQL database with semantic search — so every new session can recall what you've worked on before.
 
+## What's new
+
+| Date | Feature |
+|------|---------|
+| 2026-04-12 | **Behavioral signal extraction** — `extract_signals.py` parses session JSONL files without an LLM to produce preference memories from correction signals and pattern memories from tool/command/file habits |
+| 2026-04-11 | **`find_duplicates` + `bulk_delete` tools** — surface near-duplicate memory pairs and soft-delete memories in bulk by tag, project, or source |
+| 2026-04-11 | **`hybrid_search` tool** — combined keyword + semantic search with configurable weights |
+| 2026-04-11 | **Search cache** — 10-minute in-process cache for `semantic_search` and `search_memories`; cleared via `POST /cache/invalidate` |
+| 2026-04-11 | **Distillation failure cap** — sessions that fail distillation 3 times are skipped automatically; use `--reset-failures` to retry |
+| 2026-04-11 | **Soft deletes + health endpoint** — memories can be hidden and restored; `/health` liveness probe added |
+| 2026-03-23 | **Deduplication** — `content_hash` unique constraint prevents duplicate memories at insert time |
+| 2026-03-14 | **Local Ollama distillation** — sessions distilled via local LLM (no API key); parallel worker support |
+| 2026-03-08 | **Test suite, export, time filtering** — 76 tests, `export_memories` tool, `since`/`before` filters on all search tools |
+
 ## How it works
 
 Two Docker containers:
@@ -116,9 +130,45 @@ Sessions that fail distillation 3 times are capped and skipped automatically. Us
 
 Speed notes: sessions are processed in parallel (`--workers`, default 4), embeddings are batched per session, and DB inserts are bulk operations — roughly 4x faster than sequential processing.
 
+## Behavioral signal extraction ✨ New
+
+`extract_signals.py` parses session JSONL files directly — no LLM required — to produce two classes of memory:
+
+**Per-session (saved immediately):**
+- **Correction signals** — user messages that negate or correct Claude's previous action (e.g. "don't do that", "stop", "actually no") are saved as `type:preference` memories, building an automatic picture of your implicit preferences over time.
+
+**Per-project (aggregated, refreshed on every run):**
+- **Workflow fingerprint** — breakdown of tool categories used (execution, file editing, search, web, etc.)
+- **Command habits** — most frequently run shell commands
+- **File hotspots** — files accessed 2+ times across sessions
+
+```bash
+# Preview what would be extracted (no DB writes)
+docker compose run --rm -T \
+  -v ~/.claude/projects:/root/.claude/projects:ro \
+  -v $(pwd)/extract_signals.py:/app/extract_signals.py:ro \
+  mcp-server python /app/extract_signals.py --dry-run
+
+# Run for real
+docker compose run --rm -T \
+  -v ~/.claude/projects:/root/.claude/projects:ro \
+  -v $(pwd)/extract_signals.py:/app/extract_signals.py:ro \
+  mcp-server python /app/extract_signals.py
+
+# Filter to one project
+  mcp-server python /app/extract_signals.py --project my-project
+```
+
+Signal memories are tagged `type:preference`, `type:pattern`, or `type:behavior` with `source:signals` so they're distinguishable from distilled or manually saved memories. Aggregate pattern memories are upserted on each run so they stay current as new sessions accumulate.
+
 ## Auto-import (macOS)
 
-Install a LaunchAgent that runs `import-cron.sh` every hour — importing new Claude Code sessions and distilling them automatically:
+Install a LaunchAgent that runs `import-cron.sh` every hour — importing new Claude Code sessions, distilling them, and extracting behavioral signals automatically:
+
+The hourly pipeline runs three steps in sequence:
+1. `import_memories.py` — imports new sessions from `~/.claude/projects`
+2. `distill_sessions.py` — summarises sessions into durable memories via Ollama
+3. `extract_signals.py` — extracts behavioral signals without an LLM
 
 ```bash
 bash setup-launchagent.sh
@@ -186,6 +236,7 @@ docker exec -i claude-memory-db psql -U claude -d memory \
 | `001_soft_deletes.sql` | `deleted_at` column on `memories` |
 | `002_content_hash_dedup.sql` | `content_hash` unique index for insert dedup |
 | `003_distill_failure_cap.sql` | `distill_failures` column on `imported_sessions` |
+| `004_signals_extracted.sql` | `signals_extracted` column on `imported_sessions` |
 
 ## Tests
 
@@ -228,12 +279,13 @@ CREATE TABLE memories (
 );
 
 CREATE TABLE imported_sessions (
-  session_id        VARCHAR(100) PRIMARY KEY,
-  project           VARCHAR(100) DEFAULT '',
-  imported_at       TIMESTAMP    DEFAULT NOW(),
-  message_count     INT          DEFAULT 0,
-  distilled         BOOLEAN      DEFAULT FALSE,
-  distill_failures  INT          DEFAULT 0
+  session_id          VARCHAR(100) PRIMARY KEY,
+  project             VARCHAR(100) DEFAULT '',
+  imported_at         TIMESTAMP    DEFAULT NOW(),
+  message_count       INT          DEFAULT 0,
+  distilled           BOOLEAN      DEFAULT FALSE,
+  distill_failures    INT          DEFAULT 0,
+  signals_extracted   BOOLEAN      DEFAULT FALSE
 );
 ```
 

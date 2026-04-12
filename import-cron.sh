@@ -34,3 +34,12 @@ $DOCKER compose run --rm -T \
   python /app/distill_sessions.py >> "$LOG" 2>&1
 
 echo "[$(date)] Distillation complete" >> "$LOG"
+
+# Step 3: Extract behavioral signals (corrections, tool patterns, file hotspots)
+$DOCKER compose run --rm -T \
+  -v "$HOME/.claude/projects:/root/.claude/projects:ro" \
+  -v "$SCRIPT_DIR/extract_signals.py:/app/extract_signals.py:ro" \
+  mcp-server \
+  python /app/extract_signals.py >> "$LOG" 2>&1
+
+echo "[$(date)] Signal extraction complete" >> "$LOG"
