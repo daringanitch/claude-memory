@@ -11,7 +11,7 @@ Persistent vector memory MCP server for Claude Code. Stores and semantically sea
 Two services, orchestrated by Docker Compose:
 
 - **PostgreSQL 16 + pgvector** (port 5432): Stores memories with 768-dimensional embeddings. Schema initialized by `init.sql`.
-- **FastMCP server** (port 3333): `mcp-server/server.py` exposes 17 MCP tools over SSE. Uses `all-mpnet-base-v2` from sentence-transformers to generate embeddings. A `ThreadedConnectionPool` keeps 1–5 persistent DB connections.
+- **FastMCP server** (port 3333): `mcp-server/server.py` exposes 18 MCP tools over SSE. Uses `all-mpnet-base-v2` from sentence-transformers to generate embeddings. A `ThreadedConnectionPool` keeps 1–5 persistent DB connections.
 - **Ollama** (port 11434, runs on host): Local LLM used by `distill_sessions.py` for session distillation. No API key required. Recommended model: `qwen2.5:7b`.
 
 The `memories` table has GIN indexes on tags and full-text search, an IVFFlat index for cosine similarity vector search, and an auto-updating `updated_at` trigger. Soft-deletes are tracked via a `deleted_at` column; use `purge_memory` to permanently remove.
@@ -95,6 +95,7 @@ Aggregate memories are upserted (`source = signals/aggregate/{type}/{project}`) 
 
 | Tool | Key Parameters | Purpose |
 |------|---------------|---------|
+| `startup_context` | `project` | **Session-start snapshot** — behavioral signals + recent distilled memories in one compact call; no search query needed |
 | `save_memory` | `content`, `tags[]`, `source`, `project` | Store a memory with auto-embedding; dedup at ≥0.92 cosine similarity |
 | `check_memory` | `content` | Dry-run write guard — returns ADD/UPDATE/NOOP with nearest match preview |
 | `semantic_search` | `query`, `limit`, `min_similarity`, `project`, `since`, `before` | Vector similarity search (cached 10 min) |
