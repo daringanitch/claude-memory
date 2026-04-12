@@ -68,6 +68,29 @@ curl -X POST http://localhost:3333/cache/invalidate
 
 The script reads `DATABASE_URL` from environment (default: `postgresql://claude:memory_pass@localhost:5432/memory`).
 
+## Signal Extraction Script
+
+`extract_signals.py` parses session JSONL files directly (no LLM) to extract behavioral signals and save them as preference and pattern memories.
+
+```bash
+# Preview without writing
+python extract_signals.py --dry-run
+
+# Run for all pending sessions
+python extract_signals.py
+
+# Filter to one project
+python extract_signals.py --project workspace
+```
+
+**What it extracts:**
+- **Correction signals** (per-session): user negation/correction messages following assistant tool use → `type:preference` memories tagged `source:signals`
+- **Workflow fingerprint** (per-project aggregate): tool category breakdown → `type:pattern`
+- **Command habits** (per-project aggregate): most-used bash commands → `type:pattern`
+- **File hotspots** (per-project aggregate): frequently accessed files → `type:pattern`
+
+Aggregate memories are upserted (`source = signals/aggregate/{type}/{project}`) so they stay current on every run. The `signals_extracted` column on `imported_sessions` tracks which sessions have been processed. Run by `import-cron.sh` as step 3 after distillation.
+
 ## MCP Tools
 
 | Tool | Key Parameters | Purpose |
