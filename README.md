@@ -257,8 +257,10 @@ Add to `~/.claude/CLAUDE.md` to instruct Claude to recall context automatically 
 ## Session Start — Memory Recall
 
 At the start of every new session, use the claude-memory MCP server:
-1. Call semantic_search with the current project name to recall prior context
-2. Briefly summarize what was found
+1. Call startup_context with the last segment of the current working directory as the project name
+   (e.g. cwd /home/user/projects/my-app → startup_context("my-app"))
+2. Call semantic_search for deeper recall on specific topics if needed
+3. Briefly summarize what was found
 
 Save key decisions, bug root causes, and user preferences using save_memory
 with descriptive tags like ["project:name", "type:decision|bug|preference|pattern"].
