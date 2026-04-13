@@ -46,13 +46,19 @@ or architectural insight from this session. Ignore greetings, navigation command
 file listings, and ephemeral details (e.g. "let me check X").
 
 Return ONLY a JSON array. Each element must have:
-- "content": a self-contained, full-sentence memory (no pronouns without antecedents)
+- "content": a detailed, self-contained memory (2-4 sentences). Include:
+    - The specific file path(s) involved, if relevant
+    - The root cause or reason behind any decision or fix
+    - The exact command, flag, or code pattern used
+    - The "why" — what problem it solved or what constraint it satisfies
+    - Any error message or failure mode that was encountered
+  Do NOT use pronouns without antecedents. Write as if the reader has zero context.
 - "tags": list of 2-5 lowercase keyword tags
 
 Example output:
 [
-  {{"content": "All Python package installation on this Mac uses brew, not pip install directly.", "tags": ["preference", "python", "brew", "macos"]}},
-  {{"content": "FastMCP.run() does not accept host/port kwargs — pass them to the FastMCP() constructor instead.", "tags": ["bug", "fastmcp", "pattern"]}}
+  {{"content": "All Python package installation on this Mac uses brew (e.g. 'brew install pytest'), not pip install directly. This is because the system Python environment is managed by Homebrew and direct pip installs can conflict with it.", "tags": ["preference", "python", "brew", "macos"]}},
+  {{"content": "FastMCP.run() does not accept host/port kwargs in mcp-server/server.py — they must be passed to the FastMCP() constructor instead (e.g. FastMCP('name', host='0.0.0.0', port=3333)). Passing them to .run() raises a TypeError at startup.", "tags": ["bug", "fastmcp", "pattern", "server"]}}
 ]
 
 If nothing durable was learned, return an empty array: []
