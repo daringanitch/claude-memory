@@ -6,8 +6,9 @@
 #   1. Starts Docker services (PostgreSQL + MCP server)
 #   2. Imports your existing Claude Code session history
 #   3. Distills sessions into durable memories via local Ollama (if running)
-#   4. Registers the MCP server with Claude Code (user scope — all projects)
-#   5. Optionally installs the hourly auto-import LaunchAgent (macOS)
+#   4. Extracts behavioral signals (workflow patterns, preferences) without an LLM
+#   5. Registers the MCP server with Claude Code (user scope — all projects)
+#   6. Optionally installs the hourly auto-import LaunchAgent (macOS)
 
 set -euo pipefail
 
@@ -58,7 +59,16 @@ else
   echo "  Start Ollama ('ollama serve') and run import-cron.sh to distill later."
 fi
 
-# ── 4. Register with Claude Code ───────────────────────────────────────────────
+# ── 4. Extract behavioral signals ─────────────────────────────────────────────
+echo ""
+echo "▶ Extracting behavioral signals (workflow patterns, preferences)..."
+docker compose run --rm -T \
+  -v "$HOME/.claude/projects:/root/.claude/projects:ro" \
+  -v "$SCRIPT_DIR/extract_signals.py:/app/extract_signals.py:ro" \
+  mcp-server \
+  python /app/extract_signals.py || true
+
+# ── 5. Register with Claude Code ───────────────────────────────────────────────
 echo ""
 echo "▶ Registering with Claude Code (user scope)..."
 if claude mcp get claude-memory &>/dev/null 2>&1; then
@@ -68,7 +78,7 @@ else
   echo "  ✅ Registered."
 fi
 
-# ── 5. LaunchAgent (optional, macOS only) ─────────────────────────────────────
+# ── 6. LaunchAgent (optional, macOS only) ─────────────────────────────────────
 if [[ "$(uname)" == "Darwin" ]]; then
   echo ""
   printf "▶ Install hourly auto-import LaunchAgent? [y/N]: "
