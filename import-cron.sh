@@ -9,7 +9,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
 # Ensure services are running
-DOCKER=/usr/local/bin/docker
+DOCKER=$(which docker || echo /usr/local/bin/docker)
 
 # Load API keys from ~/.claude/.env
 set -a && source "$HOME/.claude/.env" && set +a
