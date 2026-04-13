@@ -4,214 +4,270 @@
 
 ---
 
-Build me a persistent vector memory system for Claude Code. It should store my past Claude sessions, notes, and conversations in a local database so that every new Claude Code session can recall what I've worked on before.
+Build me a persistent vector memory system for Claude Code. It should store my past Claude sessions, notes, and conversations in a local database so that every new Claude Code session can recall what I've worked on before. It should also automatically learn my preferences and working patterns by analysing session behaviour over time.
 
 ## Architecture
 
 Two Docker containers managed by Docker Compose:
 
 1. **PostgreSQL 16 with pgvector** — stores memories as text + 768-dimensional vector embeddings
-2. **FastMCP server on port 3333** — exposes memory tools to Claude via MCP over SSE
+2. **FastMCP server on port 3333** — exposes 18 memory tools to Claude via MCP over SSE
+
+Plus three standalone Python scripts at the repo root that run inside the MCP server container:
+- `import_memories.py` — bulk-imports Claude Code sessions, Claude.ai exports, and text files
+- `distill_sessions.py` — uses a local Ollama LLM to extract durable facts from raw session transcripts
+- `extract_signals.py` — LLM-free behavioural signal extractor (correction preferences, workflow patterns)
 
 ## Database schema
 
-Two tables:
-
-**`memories`** — the primary storage table:
+**`memories`** — primary storage:
 - `id` SERIAL PRIMARY KEY
 - `content` TEXT NOT NULL
+- `content_hash` TEXT GENERATED ALWAYS AS (md5(content)) STORED — unique index for exact-dedup
 - `tags` TEXT[] DEFAULT '{}'
 - `source` VARCHAR(100) DEFAULT 'claude-code'
 - `project` VARCHAR(100) DEFAULT ''
 - `embedding` vector(768)
 - `created_at` / `updated_at` TIMESTAMP with auto-update trigger
+- `deleted_at` TIMESTAMP DEFAULT NULL — NULL = active, non-NULL = soft-deleted
 
-**`imported_sessions`** — tracks which Claude Code sessions have been imported and distilled:
+**`imported_sessions`** — tracks session import/distill/signal state:
 - `session_id` VARCHAR(100) PRIMARY KEY
 - `project` VARCHAR(100) DEFAULT ''
 - `imported_at` TIMESTAMP DEFAULT NOW()
 - `message_count` INT DEFAULT 0
 - `distilled` BOOLEAN DEFAULT FALSE
+- `distill_failures` INT DEFAULT 0 — sessions capped at 3 failures are permanently skipped
+- `signals_extracted` BOOLEAN DEFAULT FALSE
 
 Indexes:
+- `UNIQUE` on `content_hash` — enforces exact-duplicate prevention atomically
 - IVFFlat on `embedding` for cosine similarity search (lists=100)
 - GIN on `tags` array
 - GIN on `content` for full-text search
-- BTREE on `created_at DESC`
-- BTREE on `project`
+- BTREE on `created_at DESC`, `project`, and `deleted_at WHERE deleted_at IS NULL`
 
 ## MCP server (`mcp-server/server.py`)
 
 Python 3.12, using `FastMCP` from `mcp[cli]`. Load `all-mpnet-base-v2` from `sentence-transformers` at startup (768-dim embeddings). Use a `psycopg2.pool.ThreadedConnectionPool(1, 5)` for DB connections, exposed via a `@contextmanager db_conn()` helper.
 
-**Critical `db_conn()` implementation**: The connection pool reuses connections across calls. Always rollback at entry (clears any leftover transaction from previous pool use) and in the finally block (ensures clean state before return). Do NOT set `conn.autocommit = False` explicitly — it's the psycopg2 default and calling it while a transaction is open throws `set_session cannot be used inside a transaction`:
+**Critical `db_conn()` implementation**: Always rollback at entry and in the finally block. Do NOT set `conn.autocommit = False` explicitly — it's the psycopg2 default and calling it while a transaction is open throws `set_session cannot be used inside a transaction`:
 
 ```python
 @contextmanager
 def db_conn():
     conn = _pool.getconn()
     try:
-        conn.rollback()         # clean any leftover transaction
+        conn.rollback()
         register_vector(conn)
         yield conn
     finally:
-        conn.rollback()         # clean before returning to pool
+        conn.rollback()
         _pool.putconn(conn)
 ```
 
-Use structured logging throughout (`logging.basicConfig` with timestamp, level, name format). Log errors via `log.error(...)` before returning `❌ Error: {e}` strings — never propagate exceptions to the MCP caller.
+**Search cache**: Use an `OrderedDict` (LRU, max 500 entries, 10-minute TTL) to cache `semantic_search` and `search_memories` results. Invalidate on any write. Expose `POST /cache/invalidate` to clear manually.
 
-Expose these 11 tools:
+**Write guard thresholds**:
+- `GUARD_NOOP_THRESHOLD = 0.92` — skip save if near-duplicate found at this similarity
+- `GUARD_UPDATE_THRESHOLD = 0.75` — suggest update instead of new save
 
-- `save_memory(content, tags=[], source="claude-code", project="")` — embed and insert; semantic dedup check at ≥0.92 cosine similarity before inserting
-- `semantic_search(query, limit=10, min_similarity=0.3, project=None, since=None, before=None)` — vector cosine search; `since`/`before` accept ISO date strings for time-range filtering
-- `search_memories(query, limit=10, project=None, since=None, before=None)` — PostgreSQL full-text + ILIKE fallback; supports time-range filtering
-- `list_memories(limit=20, tag=None, project=None, since=None, before=None)` — recent memories, optional filters; supports time-range filtering
-- `get_memory(memory_id)` — fetch a single memory by ID with full content and timestamps
-- `recent_context(project=None, limit=10)` — recent distilled memories (tag='distilled'); ideal for session-start recall
-- `update_memory(memory_id, content=None, tags=None)` — update and re-embed if content changes
-- `delete_memory(memory_id)` — delete by ID
-- `list_tags()` — all unique tags with counts
-- `get_stats()` — total memories, breakdown by project, top sources, session import/distill status
-- `export_memories(project=None, tag=None, since=None, before=None, output_format="json")` — export as JSON or markdown; `output_format` is either `"json"` or `"markdown"`
+Use structured logging throughout. Log errors via `log.error(...)` before returning `❌ Error: {e}` strings.
 
-Build SQL queries for the search/list tools dynamically using condition lists and params arrays so filters compose cleanly. Wrap the full-text OR condition in parentheses when ANDing with additional filters.
+### All 18 MCP tools
 
-Add a `_parse_dt(value, name)` helper that returns `(datetime, None)` on success or `(None, error_str)` on invalid input, used by all tools with date parameters.
+**Session start:**
+- `startup_context(project=None)` — compact session-start snapshot: behavioural signals + recent distilled memories in one call; no search query needed. Returns a formatted markdown block.
+
+**Write:**
+- `save_memory(content, tags=[], source="claude-code", project="")` — embed and insert; semantic dedup at ≥0.92 cosine similarity; `ON CONFLICT (content_hash) DO UPDATE SET deleted_at=NULL` to restore exact-duplicate soft-deleted rows
+- `check_memory(content)` — dry-run write guard; returns ADD/UPDATE/NOOP with nearest match preview
+- `update_memory(memory_id, content=None, tags=None, force=False)` — update and re-embed; warns on near-duplicate unless `force=True`
+
+**Search:**
+- `semantic_search(query, limit=10, min_similarity=0.3, project=None, since=None, before=None)` — vector cosine search; cached 10 min
+- `search_memories(query, limit=10, project=None, since=None, before=None)` — PostgreSQL full-text + ILIKE fallback; cached 10 min
+- `hybrid_search(query, limit=10, keyword_weight=0.7, semantic_weight=0.3, min_semantic_similarity=0.1, project=None, since=None, before=None)` — combined keyword + semantic with configurable weights
+
+**Read:**
+- `list_memories(limit=20, offset=0, tag=None, project=None, since=None, before=None)` — paginated; returns `{total, limit, offset, memories[]}`
+- `get_memory(memory_id)` — fetch by ID; returns even soft-deleted rows (deleted_at visible)
+- `recent_context(project=None, limit=10)` — recent distilled memories; falls back to most recent active if none distilled
+
+**Delete/restore:**
+- `delete_memory(memory_id)` — soft-delete (hidden, recoverable)
+- `restore_memory(memory_id)` — restore a soft-deleted memory
+- `purge_memory(memory_id)` — permanent delete; requires soft-delete first (two-step safety gate)
+- `bulk_delete(tag=None, project=None, source=None, dry_run=True)` — soft-delete all matching; `dry_run=True` by default
+
+**Utilities:**
+- `list_tags()` — all unique tags with counts (active only)
+- `get_stats()` — counts by project/source, deleted count, session import/distill/signals status, cache size
+- `export_memories(project=None, tag=None, since=None, before=None, output_format="json")` — export as JSON or markdown
+- `find_duplicates(threshold=0.85, limit=20, project=None, scan_limit=500)` — near-duplicate pairs above threshold
+
+### HTTP endpoints
+
+- `GET /health` — liveness probe; returns `{"status":"ok"}` (200) or `{"status":"degraded"}` (503)
+- `POST /cache/invalidate` — clear the search cache; call after bulk imports
 
 ## Dockerfile
 
-`python:3.12-slim`. Set `ENV PYTHONUNBUFFERED=1`. Pre-download the model at build time with a `RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-mpnet-base-v2')"` layer so startup is fast.
+`python:3.12-slim`. Install torch CPU-only first (large layer, cache separately), then `requirements.txt`. Pre-download the embedding model at build time. Set `TRANSFORMERS_OFFLINE=1` and `HF_DATASETS_OFFLINE=1` in the compose file to prevent network calls on restart.
 
 ## Docker Compose
 
-- `db`: `pgvector/pgvector:pg16`, healthcheck with `pg_isready`, mount `init.sql` as entrypoint init script, persist data to `./data/postgres/`, container name `claude-memory-db`
-- `mcp-server`: build from `./mcp-server/Dockerfile`, depends on `db` health, mount a named volume for the HuggingFace model cache; load `~/.claude/.env` via `env_file` (optional, `required: false`), container name `claude-memory-mcp`
+- `db`: `pgvector/pgvector:pg16`, healthcheck with `pg_isready`, mount `init.sql`, persist to `./data/postgres/`, container name `claude-memory-db`
+- `mcp-server`: build `./mcp-server/`, depends on `db` health, named volume for HuggingFace model cache, load `~/.claude/.env` via `env_file` (optional, `required: false`), container name `claude-memory-mcp`
 - Credentials: db=`memory`, user=`claude`, password=`memory_pass`
-- No `version:` key (deprecated in modern Compose)
+- No `version:` key (deprecated)
 
 ## Import script (`import_memories.py`)
 
-Standalone CLI at the repo root. Uses the same embedding model and DB connection as the server. Use structured logging (`logging.getLogger("import")`). Three import sources:
+Standalone CLI. Structured logging (`logging.getLogger("import")`). Deduplicates using `ON CONFLICT (content_hash) DO NOTHING`. Three sources:
 
-**Claude Code sessions** (`--claude-code`, `--project NAME`):
-- Read JSONL files from `~/.claude/projects/*/`
-- Extract `user` and `assistant` messages, skip if under `--min-length` (default 50)
-- Handle content as either plain string or list of `{type: "text", text: "..."}` blocks
-- Use `ON CONFLICT DO NOTHING` to avoid duplicates on re-runs
-- Tags: `["claude-code-session", "role:{role}", "project:{project_name}"]`
-- Preserve original timestamps from the JSONL `timestamp` field
-- Decode project directory names dynamically using `Path.home()` — no hardcoded usernames
-- Track each session in `imported_sessions`; skip sessions already marked `distilled=TRUE`
-- Catch `psycopg2.Error` and general `Exception` separately in per-session error handling
+**Claude Code sessions** (`--claude-code`, `--project NAME`, `--min-length 50`):
+- Read JSONL from `~/.claude/projects/*/`
+- Extract `user`/`assistant` messages; handle content as string or `[{type:"text", text:"..."}]` blocks
+- Preserve original timestamps; decode project dirs using `Path.home()` — no hardcoded paths
+- Track sessions in `imported_sessions`; skip already-imported sessions
 
-**Claude.ai export** (`--claude-ai FILE`):
-- Accept `conversations.json` from Claude.ai Settings → Privacy → Export
-- Handle flexible JSON structure (list or dict with `conversations` key)
-- Extract `chat_messages` or `messages`, handle both `sender` and `role` fields
-- Tags: `["claude-ai", "role:{role}", "convo:{name}"]`
+**Claude.ai export** (`--claude-ai FILE`): `conversations.json` from Claude.ai export; handle flexible JSON structure.
 
-**Text/markdown files** (`--text FILE...`):
-- Chunk at 1500 chars with 200-char overlap
-- Tags: `["text-import", "file:{name}", "type:{ext}"]`
-
-Do NOT import numpy — it is not needed.
+**Text/markdown** (`--text FILE...`): chunk at 1500 chars with 200-char overlap.
 
 ## Distillation script (`distill_sessions.py`)
 
-Standalone CLI at the repo root. Use structured logging (`logging.getLogger("distill")`). Reads sessions from `imported_sessions` where `distilled=FALSE`, sends the raw message transcript to Claude Haiku (`claude-haiku-4-5-20251001`), extracts durable memories (decisions, patterns, bug fixes), stores them tagged `["distilled", "project:{name}", ...]`, deletes the raw messages, and marks the session `distilled=TRUE`.
+Uses a **local Ollama LLM** (no API key required). Default model: `qwen2.5:7b`. Connect via OpenAI-compatible API at `OLLAMA_URL` (default `http://localhost:11434/v1`, use `http://host.docker.internal:11434/v1` inside Docker).
+
+- Reads `imported_sessions` where `distilled=FALSE` and `distill_failures < 3`
+- Sends transcript to Ollama; extracts durable memories (decisions, patterns, bug fixes) as JSON array
+- Stores memories tagged `["distilled", "project:{name}", ...]`; deletes raw messages; marks `distilled=TRUE`
+- Sessions failing 3 times get capped (`distill_failures >= 3`); use `--reset-failures` to retry
+- Parallel processing via `ThreadPoolExecutor` (`--workers 4` default); batch embedding
 
 ```bash
-python distill_sessions.py               # distill all pending
-python distill_sessions.py --project X   # filter by project
-python distill_sessions.py --dry-run     # preview without writing
+python distill_sessions.py                          # all pending
+python distill_sessions.py --project X              # filter by project
+python distill_sessions.py --dry-run                # preview without writing
+python distill_sessions.py --model llama3.2:3b      # model override
+python distill_sessions.py --reset-failures         # reset all capped sessions
+python distill_sessions.py --reset-failures abc123  # reset one session
 ```
 
-Requires `ANTHROPIC_API_KEY`. Max transcript size: 80,000 chars (~20k tokens).
+## Signal extraction script (`extract_signals.py`)
 
-Catch `json.JSONDecodeError`, `anthropic.APIError`, `psycopg2.Error`, and general `Exception` separately. Do NOT import numpy.
+LLM-free behavioural analysis. Reads session JSONL files directly. Marks processed sessions via `signals_extracted` column. Two types of output:
+
+**Per-session** (saved immediately):
+- Correction signals: user messages matching negation/correction patterns immediately after assistant tool_use → `type:preference` memories tagged `source:signals`
+
+**Per-project** (aggregated, upserted on every run):
+- Workflow fingerprint: tool category breakdown → `type:pattern`
+- Command habits: most-used bash commands → `type:pattern`
+- File hotspots: files accessed 2+ times → `type:pattern`
+
+Aggregate memories use `source = signals/aggregate/{type}/{project}` — delete-then-insert so they stay current.
+
+```bash
+python extract_signals.py            # all pending sessions
+python extract_signals.py --dry-run  # preview without writing
+python extract_signals.py --project X
+```
 
 ## Auto-import script (`import-cron.sh`)
 
-Shell script at repo root. Uses `$HOME` and `SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"` — no hardcoded paths. Steps:
+Shell script at repo root. Uses `DOCKER=$(which docker || echo /usr/local/bin/docker)` — no hardcoded paths. Three steps:
 
-1. `docker compose up -d` (ensure services running)
+1. `docker compose up -d` (ensure services running), sleep 8
 2. Run `import_memories.py --claude-code` inside the mcp-server container
-3. Run `distill_sessions.py` inside the mcp-server container (pass `ANTHROPIC_API_KEY` via `-e`, not `--env-file` which isn't supported in all Docker Compose versions)
-4. Log to `/tmp/claude-memory-import.log`
+3. Run `distill_sessions.py` inside the mcp-server container (pass `OLLAMA_URL=http://host.docker.internal:11434/v1`)
+4. Run `extract_signals.py` inside the mcp-server container
+5. Log all output to `/tmp/claude-memory-import.log`
 
 ## LaunchAgent setup script (`setup-launchagent.sh`)
 
-Script that auto-generates and installs `~/Library/LaunchAgents/com.claude-memory.import.plist`. Should:
-- Write the plist with `StartInterval: 3600`, stdout/stderr log paths in `/tmp/`, and PATH including `/opt/homebrew/bin`
-- Unload any existing agent before reloading
-- Print useful commands (tail logs, start now, disable, re-enable)
+Generates and installs `~/Library/LaunchAgents/com.claude-memory.import.plist`:
+- `StartInterval: 3600`, `RunAtLoad: false`
+- stdout/stderr to `/tmp/`, PATH including `/opt/homebrew/bin`, HOME env var set
+- Unload existing before reloading
 
-## Backup and restore scripts
+## Migrations (`migrations/`)
 
-`backup.sh`: use `docker exec` to run `pg_dump --format=custom --compress=9` against the `claude-memory-db` container, save to `./backups/claude-memory-TIMESTAMP.pgdump`. Ensure the container is running first.
+Schema changes are in numbered SQL files, idempotent with `IF NOT EXISTS`:
+- `001_add_content_hash_dedup.sql` — adds `content_hash` generated column + unique index
+- `002_soft_deletes.sql` — adds `deleted_at` column
+- `003_distill_failure_cap.sql` — adds `distill_failures` column
+- `004_signals_extracted.sql` — adds `signals_extracted` column
 
-`restore.sh`: accept a dump file path as argument, prompt for `YES` confirmation, drop and recreate the `memory` database, restore via `pg_restore`. Remind user to restart the MCP server after restore.
+`extract_signals.py` also applies migration 004 automatically at startup via `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`.
 
 ## Quickstart script (`quickstart.sh`)
 
-One-command setup script that chains all the above steps: start Docker, wait for DB health, import Claude Code sessions, distill (if API key available), register with Claude Code via `claude mcp add --scope user --transport sse`, optionally install the LaunchAgent. Print a helpful summary at the end.
-
-## Test suite (`tests/`)
-
-`tests/conftest.py`: patch heavy dependencies via `sys.modules` before any source module imports them — sentence_transformers, psycopg2, pgvector, anthropic, mcp. Make `@mcp.tool()` a pass-through decorator so decorated functions remain callable.
-
-`tests/test_import.py`: test `extract_text()` for plain strings, list of content blocks, empty lists, non-text block types.
-
-`tests/test_distill.py`: test `parse_distilled()` for valid JSON, JSON with preamble, empty array, no array, multiple items; test `build_transcript()` for joining, skipping empty content, truncation.
-
-`tests/test_server.py`: test `_parse_dt()` for valid dates, valid datetimes, empty/None, invalid; test tool functions (`save_memory`, `semantic_search`, `list_memories`, `delete_memory`, `export_memories`) with mocked DB connections — cover success paths, empty results, error conditions, invalid parameters.
-
-37 tests total. Only `pytest` required to run them — no Docker, no GPU, no API keys.
-
-## CI (`./github/workflows/ci.yml`)
-
-GitHub Actions workflow: trigger on push/PR to main, matrix of Python 3.11 and 3.12, install only `pytest`, run `pytest tests/ -v`.
-
-## Register with Claude Code
-
-Use `claude mcp add` — NOT `settings.json` (the `mcpServers` key in settings.json is not read by Claude Code):
+Six steps: start Docker → import sessions → distill (if Ollama running) → extract signals → register with Claude Code → optionally install LaunchAgent.
 
 ```bash
 claude mcp add --scope user --transport sse claude-memory http://localhost:3333/sse
 ```
 
+## Test suite (`tests/`)
+
+`tests/conftest.py`: patch heavy deps via `sys.modules` before imports — sentence_transformers, psycopg2, pgvector, openai, mcp. Make `@mcp.tool()` a pass-through decorator.
+
+Key test files:
+- `test_import.py` — `extract_text()` for strings, content blocks, edge cases
+- `test_distill.py` — `parse_distilled()`, `build_transcript()` including truncation
+- `test_server.py` — all tool functions with mocked DB; cover success, empty results, errors, invalid params, cache behaviour, soft-delete flow, dedup logic
+
+76 tests total. Only `pytest` required — no Docker, GPU, or API keys.
+
+## CI (`.github/workflows/ci.yml`)
+
+Trigger on push/PR to main. Python 3.11 and 3.12 matrix. Steps: install pytest + pip-audit, run `pip-audit --fail-on high`, run `pytest tests/ -v --cov --cov-fail-under=80`.
+
 ## Global Claude Code instruction
 
-Create `~/.claude/CLAUDE.md` with instructions telling Claude to, at the start of every new session:
-1. Call `semantic_search` with the current project name to recall prior context
-2. Briefly summarize what was found
+Create `~/.claude/CLAUDE.md` telling Claude to, at the start of every new session:
+1. Call `startup_context` with the last segment of the current working directory as the project name (e.g. cwd `/home/user/projects/my-app` → `startup_context("my-app")`)
+2. Call `semantic_search` for deeper recall on specific topics if needed
+3. Briefly summarize what was found
 
-Also include a note to save key decisions, bug root causes, and user preferences to memory during sessions using descriptive tags like `["project:{name}", "type:decision|bug|preference|pattern"]`.
+Also save key decisions, bug root causes, and preferences using `save_memory` with tags `["project:{name}", "type:decision|bug|preference|pattern"]`.
 
 ## Files to create
 
 ```
 claude-memory/
-├── quickstart.sh            (chmod +x — one-command setup)
+├── quickstart.sh
 ├── docker-compose.yml
 ├── init.sql
 ├── import_memories.py
 ├── distill_sessions.py
-├── import-cron.sh           (chmod +x)
-├── setup-launchagent.sh     (chmod +x)
-├── backup.sh                (chmod +x)
-├── restore.sh               (chmod +x)
-├── .gitignore               (exclude data/, .claude/, __pycache__, .env, *.log, .DS_Store, backups/)
+├── extract_signals.py
+├── import-cron.sh
+├── setup-launchagent.sh
+├── backup.sh
+├── restore.sh
 ├── CLAUDE.md
+├── CONTRIBUTING.md
+├── .gitignore               (exclude data/, venv/, __pycache__, .env, *.log, .DS_Store, backups/)
+├── migrations/
+│   ├── 001_add_content_hash_dedup.sql
+│   ├── 002_soft_deletes.sql
+│   ├── 003_distill_failure_cap.sql
+│   └── 004_signals_extracted.sql
 ├── tests/
 │   ├── conftest.py
 │   ├── test_import.py
 │   ├── test_distill.py
 │   └── test_server.py
-├── .github/workflows/ci.yml
+├── .github/
+│   ├── workflows/ci.yml
+│   └── ISSUE_TEMPLATE/
+│       ├── bug_report.md
+│       └── feature_request.md
 └── mcp-server/
     ├── Dockerfile
-    ├── requirements.txt     (mcp[cli], psycopg2-binary, pgvector, uvicorn, sentence-transformers, anthropic)
+    ├── requirements.txt     (mcp[cli], psycopg2-binary, pgvector, uvicorn, sentence-transformers, numpy, openai)
     └── server.py
 ```
