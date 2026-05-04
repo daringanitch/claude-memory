@@ -317,23 +317,45 @@ def _api_recall(query: str, threshold: float = 0.78, limit: int = 20) -> list:
 
 
 def _api_preferences() -> list:
-    """Return type:preference and type:pattern memories grouped by category tag."""
+    """Return behavioral preferences grouped by category.
+
+    Sources (in display order):
+      1. type:preference — explicit written preferences (auto-memory imports)
+      2. type:pattern + source:signals — mechanical behavioral signals (extract_signals.py)
+      3. distilled + (preference|decision|type:behavior) — implicit patterns from session distillation
+    """
     from datetime import datetime, timezone
     with db_conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 "SELECT id, content, tags, project, created_at, updated_at "
                 "FROM memories WHERE deleted_at IS NULL "
-                "AND ('type:preference' = ANY(tags) OR 'type:pattern' = ANY(tags)) "
+                "AND ("
+                "  'type:preference' = ANY(tags) "
+                "  OR ('type:pattern' = ANY(tags) AND 'source:signals' = ANY(tags)) "
+                "  OR ('distilled' = ANY(tags) AND ("
+                "        'preference' = ANY(tags) OR 'decision' = ANY(tags)"
+                "        OR 'type:behavior' = ANY(tags)"
+                "  ))"
+                ") "
                 "ORDER BY updated_at DESC"
             )
             rows = [dict(r) for r in cur.fetchall()]
     now = datetime.now(timezone.utc)
     groups: dict[str, list] = {}
     for r in rows:
-        cat = next((t.split("category:")[1] for t in r["tags"] if t.startswith("category:")), "general")
+        tags = r["tags"] or []
+        # Determine display category
+        if "type:preference" in tags and "source:auto-memory" in tags:
+            cat = next((t.split("category:")[1] for t in tags if t.startswith("category:")), "explicit")
+        elif "source:signals" in tags:
+            cat = "signals"
+        elif "distilled" in tags:
+            cat = next((t.split("category:")[1] for t in tags if t.startswith("category:")), "inferred")
+        else:
+            cat = next((t.split("category:")[1] for t in tags if t.startswith("category:")), "general")
+
         updated = r["updated_at"]
-        # Normalize to aware datetime regardless of input type (string from tests, datetime from DB)
         if isinstance(updated, str):
             try:
                 updated = datetime.fromisoformat(updated)
@@ -341,16 +363,18 @@ def _api_preferences() -> list:
                 updated = None
         if updated is not None and hasattr(updated, "tzinfo") and updated.tzinfo is None:
             updated = updated.replace(tzinfo=timezone.utc)
-        if updated is not None:
-            age_days = (now - updated).days
-        else:
-            age_days = 999
+        age_days = (now - updated).days if updated is not None else 999
         confidence = 0.95 if age_days <= 7 else (0.80 if age_days <= 30 else 0.65)
-        source_tag = next((t for t in r["tags"] if t.startswith("source:")), "")
+        source_tag = next((t for t in tags if t.startswith("source:")), "")
         source = source_tag.replace("source:", "") if source_tag else r["project"] or "unknown"
         item = {"text": r["content"], "confidence": confidence, "source": source}
         groups.setdefault(cat, []).append(item)
-    return [{"category": cat, "items": items} for cat, items in groups.items()]
+
+    # Fixed display order: explicit → signals → inferred → everything else
+    ORDER = ["explicit", "feedback", "signals", "inferred"]
+    ordered = {k: groups[k] for k in ORDER if k in groups}
+    ordered.update({k: v for k, v in groups.items() if k not in ORDER})
+    return [{"category": cat, "items": items} for cat, items in ordered.items()]
 
 
 def _api_bulk_delete(project: str = None, tag: str = None, dry_run: bool = True) -> dict:
