@@ -8,7 +8,8 @@ from pgvector.psycopg2 import register_vector
 from sentence_transformers import SentenceTransformer
 from mcp.server.fastmcp import FastMCP
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, HTMLResponse
+import pathlib
 
 logging.basicConfig(
     level=logging.INFO,
@@ -133,6 +134,273 @@ async def cache_invalidate_endpoint(request: Request) -> JSONResponse:
     _cache_invalidate()
     log.info("Search cache cleared via HTTP endpoint")
     return JSONResponse({"status": "ok", "message": "Search cache cleared"})
+
+
+# ── REST API helpers (called by HTTP route handlers below) ────────────────────
+
+def _api_projects() -> list:
+    """Distinct projects with memory counts, ordered by count desc."""
+    with db_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT project, COUNT(*) AS count FROM memories "
+                "WHERE deleted_at IS NULL GROUP BY project ORDER BY count DESC"
+            )
+            return [dict(r) for r in cur.fetchall()]
+
+
+def _api_tags() -> list:
+    """All tags with counts across active memories, ordered by count desc."""
+    with db_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT tag, COUNT(*) AS count FROM memories, unnest(tags) AS tag "
+                "WHERE deleted_at IS NULL GROUP BY tag ORDER BY count DESC"
+            )
+            return [dict(r) for r in cur.fetchall()]
+
+
+def _api_stats() -> dict:
+    """Aggregate stats: counts, project count, and estimated storage.
+
+    Storage estimate: 3072 bytes/embedding (768 floats × 4 bytes) + avg content length + 200 bytes metadata overhead. Not from pg_relation_size — treat as approximate."""
+    with db_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT "
+                "  COUNT(*) FILTER (WHERE deleted_at IS NULL) AS active, "
+                "  COUNT(*) FILTER (WHERE deleted_at IS NOT NULL) AS deleted, "
+                "  COUNT(DISTINCT project) FILTER (WHERE deleted_at IS NULL) AS projects, "
+                "  COALESCE(AVG(LENGTH(content)) FILTER (WHERE deleted_at IS NULL), 0)::int AS avg_content_len "
+                "FROM memories"
+            )
+            row = dict(cur.fetchone())
+    # Rough storage estimate: each embedding is 768 floats × 4 bytes = 3072 bytes
+    # Plus avg content length. Multiply by active memory count.
+    active = row["active"] or 0
+    embedding_bytes = active * 3072
+    content_bytes = active * (row["avg_content_len"] or 0)
+    metadata_bytes = active * 200  # tags, timestamps, id overhead estimate
+    total_bytes = embedding_bytes + content_bytes + metadata_bytes
+    row["storage_mb"] = round(total_bytes / 1_048_576, 1)
+    row["storage_breakdown"] = {
+        "embeddings_mb": round(embedding_bytes / 1_048_576, 1),
+        "content_mb": round(content_bytes / 1_048_576, 1),
+        "metadata_mb": round(metadata_bytes / 1_048_576, 1),
+    }
+    return row
+
+
+def _api_list_memories(project: str = None, tag: str = None,
+                        since: str = None, before: str = None,
+                        limit: int = 50, offset: int = 0) -> list:
+    """Paginated list of active memories with derived 'title' and 'content_length' fields."""
+    conditions = ["m.deleted_at IS NULL"]
+    params = []
+    if project:
+        conditions.append("m.project = %s")
+        params.append(project)
+    if tag:
+        conditions.append("%s = ANY(m.tags)")
+        params.append(tag)
+    since_dt, err = _parse_dt(since, "since")
+    if err:
+        raise ValueError(err)
+    before_dt, err = _parse_dt(before, "before")
+    if err:
+        raise ValueError(err)
+    if since_dt:
+        conditions.append("m.created_at >= %s")
+        params.append(since_dt)
+    if before_dt:
+        conditions.append("m.created_at < %s")
+        params.append(before_dt)
+    where = " AND ".join(conditions)
+    params.extend([limit, offset])
+    with db_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                f"SELECT id, content, tags, source, project, created_at, updated_at "
+                f"FROM memories m WHERE {where} "
+                f"ORDER BY created_at DESC LIMIT %s OFFSET %s",
+                params
+            )
+            rows = [dict(r) for r in cur.fetchall()]
+    for r in rows:
+        c = r["content"]
+        r["title"] = (c[:72] + "…") if len(c) > 72 else c
+        r["content_length"] = len(c)
+        if r.get("created_at"):
+            r["created_at"] = r["created_at"].isoformat() if hasattr(r["created_at"], "isoformat") else r["created_at"]
+        if r.get("updated_at"):
+            r["updated_at"] = r["updated_at"].isoformat() if hasattr(r["updated_at"], "isoformat") else r["updated_at"]
+    return rows
+
+
+def _api_get_memory(memory_id: int) -> dict | None:
+    """Fetch single memory by id. Returns None if not found."""
+    with db_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id, content, tags, source, project, created_at, updated_at, deleted_at "
+                "FROM memories WHERE id = %s",
+                (memory_id,)
+            )
+            row = cur.fetchone()
+    if not row:
+        return None
+    r = dict(row)
+    r["title"] = (r["content"][:72] + "…") if len(r["content"]) > 72 else r["content"]
+    r["content_length"] = len(r["content"])
+    for f in ("created_at", "updated_at", "deleted_at"):
+        if r.get(f) and hasattr(r[f], "isoformat"):
+            r[f] = r[f].isoformat()
+    return r
+
+
+def _api_related_memories(memory_id: int, limit: int = 3) -> list:
+    """Return up to `limit` nearest-neighbor memories to the given memory id."""
+    source = _api_get_memory(memory_id)
+    if not source:
+        return []
+    vec = embed(source["content"])
+    with db_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id, content, tags, project, created_at, "
+                "ROUND((1 - (embedding <=> %s))::numeric, 4) AS sim "
+                "FROM memories WHERE deleted_at IS NULL AND id != %s "
+                "ORDER BY embedding <=> %s LIMIT %s",
+                (vec, memory_id, vec, limit)
+            )
+            rows = [dict(r) for r in cur.fetchall()]
+    for r in rows:
+        r["title"] = (r["content"][:72] + "…") if len(r["content"]) > 72 else r["content"]
+        if r.get("created_at") and hasattr(r["created_at"], "isoformat"):
+            r["created_at"] = r["created_at"].isoformat()
+        r["sim"] = float(r["sim"])
+    return rows
+
+
+def _api_recall(query: str, threshold: float = 0.78, limit: int = 20) -> list:
+    """Semantic search. Returns ranked list with score and snippet."""
+    if not query.strip():
+        return []
+    vec = embed(query)
+    with db_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id, content, tags, project, created_at, "
+                "ROUND((1 - (embedding <=> %s))::numeric, 4) AS sim "
+                "FROM memories WHERE deleted_at IS NULL "
+                "AND (1 - (embedding <=> %s)) >= %s "
+                "ORDER BY embedding <=> %s LIMIT %s",
+                (vec, vec, threshold, vec, limit)
+            )
+            rows = [dict(r) for r in cur.fetchall()]
+    results = []
+    for r in rows:
+        title = (r["content"][:72] + "…") if len(r["content"]) > 72 else r["content"]
+        snippet = r["content"][:200]
+        if r.get("created_at") and hasattr(r["created_at"], "isoformat"):
+            r["created_at"] = r["created_at"].isoformat()
+        results.append({
+            "id": r["id"],
+            "title": title,
+            "snippet": snippet,
+            "tags": r["tags"],
+            "project": r["project"],
+            "created_at": r["created_at"],
+            "sim": float(r["sim"]),
+        })
+    return results
+
+
+def _api_preferences() -> list:
+    """Return behavioral preferences grouped by category.
+
+    Sources (in display order):
+      1. type:preference — explicit written preferences (auto-memory imports)
+      2. type:pattern + source:signals — mechanical behavioral signals (extract_signals.py)
+      3. distilled + (preference|decision|type:behavior) — implicit patterns from session distillation
+    """
+    from datetime import datetime, timezone
+    with db_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id, content, tags, project, created_at, updated_at "
+                "FROM memories WHERE deleted_at IS NULL "
+                "AND ("
+                "  'type:preference' = ANY(tags) "
+                "  OR ('type:pattern' = ANY(tags) AND 'source:signals' = ANY(tags)) "
+                "  OR ('distilled' = ANY(tags) AND ("
+                "        'preference' = ANY(tags) OR 'decision' = ANY(tags)"
+                "        OR 'type:behavior' = ANY(tags)"
+                "  ))"
+                ") "
+                "ORDER BY updated_at DESC"
+            )
+            rows = [dict(r) for r in cur.fetchall()]
+    now = datetime.now(timezone.utc)
+    groups: dict[str, list] = {}
+    for r in rows:
+        tags = r["tags"] or []
+        # Determine display category
+        if "type:preference" in tags and "source:auto-memory" in tags:
+            cat = next((t.split("category:")[1] for t in tags if t.startswith("category:")), "explicit")
+        elif "source:signals" in tags:
+            cat = "signals"
+        elif "distilled" in tags:
+            cat = next((t.split("category:")[1] for t in tags if t.startswith("category:")), "inferred")
+        else:
+            cat = next((t.split("category:")[1] for t in tags if t.startswith("category:")), "general")
+
+        updated = r["updated_at"]
+        if isinstance(updated, str):
+            try:
+                updated = datetime.fromisoformat(updated)
+            except ValueError:
+                updated = None
+        if updated is not None and hasattr(updated, "tzinfo") and updated.tzinfo is None:
+            updated = updated.replace(tzinfo=timezone.utc)
+        age_days = (now - updated).days if updated is not None else 999
+        confidence = 0.95 if age_days <= 7 else (0.80 if age_days <= 30 else 0.65)
+        source_tag = next((t for t in tags if t.startswith("source:")), "")
+        source = source_tag.replace("source:", "") if source_tag else r["project"] or "unknown"
+        item = {"text": r["content"], "confidence": confidence, "source": source}
+        groups.setdefault(cat, []).append(item)
+
+    # Fixed display order: explicit → signals → inferred → everything else
+    ORDER = ["explicit", "feedback", "signals", "inferred"]
+    ordered = {k: groups[k] for k in ORDER if k in groups}
+    ordered.update({k: v for k, v in groups.items() if k not in ORDER})
+    return [{"category": cat, "items": items} for cat, items in ordered.items()]
+
+
+def _api_bulk_delete(project: str = None, tag: str = None, dry_run: bool = True) -> dict:
+    """Soft-delete memories matching project and/or tag filter."""
+    if not project and not tag:
+        return {"error": "At least one filter (project or tag) is required"}
+    conditions = ["deleted_at IS NULL"]
+    params = []
+    if project:
+        conditions.append("project = %s")
+        params.append(project)
+    if tag:
+        conditions.append("%s = ANY(tags)")
+        params.append(tag)
+    where = " AND ".join(conditions)
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            if dry_run:
+                cur.execute(f"SELECT COUNT(*) FROM memories WHERE {where}", params)
+                count = cur.fetchone()[0]
+            else:
+                cur.execute(f"UPDATE memories SET deleted_at = NOW() WHERE {where}", params)
+                count = cur.rowcount
+                conn.commit()
+                _cache_invalidate()
+    return {"deleted": count, "dry_run": dry_run, "project": project, "tag": tag}
 
 
 # ── Write guard ────────────────────────────────────────────────────────────────
@@ -976,6 +1244,134 @@ def bulk_delete(tag: str = None, project: str = None, source: str = None,
     except Exception as e:
         log.error("bulk_delete failed: %s", e)
         return f"❌ Error: {e}"
+
+# ── REST HTTP route handlers ───────────────────────────────────────────────────
+
+@mcp.custom_route("/ui", methods=["GET"])
+async def serve_ui(request: Request) -> HTMLResponse | JSONResponse:
+    """Serve the single-file React UI."""
+    ui_path = pathlib.Path(__file__).parent / "ui.html"
+    if not ui_path.exists():
+        return JSONResponse({"error": "ui.html not found"}, status_code=404)
+    return HTMLResponse(ui_path.read_text(encoding="utf-8"))
+
+
+@mcp.custom_route("/api/projects", methods=["GET"])
+async def api_projects(request: Request) -> JSONResponse:
+    try:
+        return JSONResponse(_api_projects())
+    except Exception as e:
+        log.error("GET /api/projects failed: %s", e)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/api/tags", methods=["GET"])
+async def api_tags(request: Request) -> JSONResponse:
+    try:
+        return JSONResponse(_api_tags())
+    except Exception as e:
+        log.error("GET /api/tags failed: %s", e)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/api/stats", methods=["GET"])
+async def api_stats(request: Request) -> JSONResponse:
+    try:
+        return JSONResponse(_api_stats())
+    except Exception as e:
+        log.error("GET /api/stats failed: %s", e)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/api/memories", methods=["GET"])
+async def api_memories_list(request: Request) -> JSONResponse:
+    try:
+        q = request.query_params
+        try:
+            limit  = int(q.get("limit", 50))
+            offset = int(q.get("offset", 0))
+        except ValueError:
+            return JSONResponse({"error": "limit and offset must be integers"}, status_code=400)
+        rows = _api_list_memories(
+            project=q.get("project"),
+            tag=q.get("tag"),
+            since=q.get("since"),
+            before=q.get("before"),
+            limit=limit,
+            offset=offset,
+        )
+        return JSONResponse(rows)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except Exception as e:
+        log.error("GET /api/memories failed: %s", e)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/api/memories/{id}", methods=["GET"])
+async def api_memory_get(request: Request) -> JSONResponse:
+    try:
+        memory_id = int(request.path_params["id"])
+        row = _api_get_memory(memory_id)
+        if row is None:
+            return JSONResponse({"error": "Not found"}, status_code=404)
+        return JSONResponse(row)
+    except (ValueError, KeyError):
+        return JSONResponse({"error": "Invalid id"}, status_code=400)
+    except Exception as e:
+        log.error("GET /api/memories/%s failed: %s", request.path_params.get("id"), e)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/api/memories/{id}/related", methods=["GET"])
+async def api_memory_related(request: Request) -> JSONResponse:
+    try:
+        memory_id = int(request.path_params["id"])
+        limit = int(request.query_params.get("limit", 3))
+        return JSONResponse(_api_related_memories(memory_id, limit=limit))
+    except (ValueError, KeyError):
+        return JSONResponse({"error": "Invalid id"}, status_code=400)
+    except Exception as e:
+        log.error("GET /api/memories/%s/related failed: %s", request.path_params.get("id"), e)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/api/recall", methods=["POST"])
+async def api_recall(request: Request) -> JSONResponse:
+    try:
+        body = await request.json()
+        query = body.get("query", "")
+        threshold = float(body.get("threshold", 0.78))
+        return JSONResponse(_api_recall(query, threshold=threshold))
+    except Exception as e:
+        log.error("POST /api/recall failed: %s", e)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/api/preferences", methods=["GET"])
+async def api_preferences(request: Request) -> JSONResponse:
+    try:
+        return JSONResponse(_api_preferences())
+    except Exception as e:
+        log.error("GET /api/preferences failed: %s", e)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/api/memories", methods=["DELETE"])
+async def api_memories_delete(request: Request) -> JSONResponse:
+    try:
+        q = request.query_params
+        project = q.get("project")
+        tag = q.get("tag")
+        # Treat any value other than "false" as dry_run=True; absent param defaults to False
+        dry_run = q.get("dry_run", "false").lower() != "false"
+        result = _api_bulk_delete(project=project, tag=tag, dry_run=dry_run)
+        if "error" in result:
+            return JSONResponse(result, status_code=400)
+        return JSONResponse(result)
+    except Exception as e:
+        log.error("DELETE /api/memories failed: %s", e)
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 if __name__ == "__main__":
