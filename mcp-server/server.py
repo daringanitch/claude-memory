@@ -135,6 +135,59 @@ async def cache_invalidate_endpoint(request: Request) -> JSONResponse:
     return JSONResponse({"status": "ok", "message": "Search cache cleared"})
 
 
+# ── REST API helpers (called by HTTP route handlers below) ────────────────────
+
+def _api_projects() -> list:
+    """Distinct projects with memory counts, ordered by count desc."""
+    with db_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT project, COUNT(*) AS count FROM memories "
+                "WHERE deleted_at IS NULL GROUP BY project ORDER BY count DESC"
+            )
+            return [dict(r) for r in cur.fetchall()]
+
+
+def _api_tags() -> list:
+    """All tags with counts across active memories, ordered by count desc."""
+    with db_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT tag, COUNT(*) AS count FROM memories, unnest(tags) AS tag "
+                "WHERE deleted_at IS NULL GROUP BY tag ORDER BY count DESC"
+            )
+            return [dict(r) for r in cur.fetchall()]
+
+
+def _api_stats() -> dict:
+    """Aggregate stats: counts, estimated storage, project count."""
+    with db_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT "
+                "  COUNT(*) FILTER (WHERE deleted_at IS NULL) AS active, "
+                "  COUNT(*) FILTER (WHERE deleted_at IS NOT NULL) AS deleted, "
+                "  COUNT(DISTINCT project) FILTER (WHERE deleted_at IS NULL) AS projects, "
+                "  COALESCE(AVG(LENGTH(content)) FILTER (WHERE deleted_at IS NULL), 0)::int AS avg_content_len "
+                "FROM memories"
+            )
+            row = dict(cur.fetchone())
+    # Rough storage estimate: each embedding is 768 floats × 4 bytes = 3072 bytes
+    # Plus avg content length. Multiply by active memory count.
+    active = row["active"] or 0
+    embedding_bytes = active * 3072
+    content_bytes = active * (row["avg_content_len"] or 0)
+    metadata_bytes = active * 200  # tags, timestamps, id overhead estimate
+    total_bytes = embedding_bytes + content_bytes + metadata_bytes
+    row["storage_mb"] = round(total_bytes / 1_048_576, 1)
+    row["storage_breakdown"] = {
+        "embeddings_mb": round(embedding_bytes / 1_048_576, 1),
+        "content_mb": round(content_bytes / 1_048_576, 1),
+        "metadata_mb": round(metadata_bytes / 1_048_576, 1),
+    }
+    return row
+
+
 # ── Write guard ────────────────────────────────────────────────────────────────
 
 def _write_guard(content: str, vector) -> dict:
