@@ -252,6 +252,18 @@ class TestApiPreferences:
             result = server._api_preferences()
         assert result == []
 
+    def test_confidence_medium_for_moderately_old_memories(self):
+        from datetime import datetime, timezone, timedelta
+        mid = (datetime.now(timezone.utc) - timedelta(days=15)).isoformat()
+        rows = [{"id": 3, "content": "Medium-age pref", "tags": ["type:preference"],
+                 "project": "", "created_at": mid, "updated_at": mid}]
+        cur = _make_cur(rows)
+        with patch("server.db_conn") as mock_db:
+            mock_db.return_value.__enter__ = MagicMock(return_value=_make_conn(cur))
+            mock_db.return_value.__exit__ = MagicMock(return_value=False)
+            result = server._api_preferences()
+        assert result[0]["items"][0]["confidence"] == 0.80
+
 
 class TestApiBulkDelete:
     def test_dry_run_returns_count_without_deleting(self):
