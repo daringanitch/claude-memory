@@ -8,7 +8,8 @@ from pgvector.psycopg2 import register_vector
 from sentence_transformers import SentenceTransformer
 from mcp.server.fastmcp import FastMCP
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, HTMLResponse
+import pathlib
 
 logging.basicConfig(
     level=logging.INFO,
@@ -1223,10 +1224,8 @@ def bulk_delete(tag: str = None, project: str = None, source: str = None,
 # ── REST HTTP route handlers ───────────────────────────────────────────────────
 
 @mcp.custom_route("/ui", methods=["GET"])
-async def serve_ui(request: Request):
+async def serve_ui(request: Request) -> HTMLResponse | JSONResponse:
     """Serve the single-file React UI."""
-    from starlette.responses import HTMLResponse
-    import pathlib
     ui_path = pathlib.Path(__file__).parent / "ui.html"
     if not ui_path.exists():
         return JSONResponse({"error": "ui.html not found"}, status_code=404)
@@ -1264,13 +1263,18 @@ async def api_stats(request: Request) -> JSONResponse:
 async def api_memories_list(request: Request) -> JSONResponse:
     try:
         q = request.query_params
+        try:
+            limit  = int(q.get("limit", 50))
+            offset = int(q.get("offset", 0))
+        except ValueError:
+            return JSONResponse({"error": "limit and offset must be integers"}, status_code=400)
         rows = _api_list_memories(
             project=q.get("project"),
             tag=q.get("tag"),
             since=q.get("since"),
             before=q.get("before"),
-            limit=int(q.get("limit", 50)),
-            offset=int(q.get("offset", 0)),
+            limit=limit,
+            offset=offset,
         )
         return JSONResponse(rows)
     except ValueError as e:
@@ -1335,6 +1339,7 @@ async def api_memories_delete(request: Request) -> JSONResponse:
         q = request.query_params
         project = q.get("project")
         tag = q.get("tag")
+        # Treat any value other than "false" as dry_run=True; absent param defaults to False
         dry_run = q.get("dry_run", "false").lower() != "false"
         result = _api_bulk_delete(project=project, tag=tag, dry_run=dry_run)
         if "error" in result:
