@@ -106,6 +106,11 @@ class TestApiListMemories:
         assert result[0]["title"].endswith("…")
         assert len(result[0]["title"]) <= 73  # 72 chars + ellipsis
 
+    def test_raises_on_invalid_date(self):
+        import pytest
+        with pytest.raises(ValueError):
+            server._api_list_memories(since="not-a-date")
+
 
 class TestApiGetMemory:
     def test_returns_memory_dict(self):
@@ -154,6 +159,10 @@ class TestApiRelatedMemories:
             mock_db.side_effect = db_conn_side_effect
             result = server._api_related_memories(1, limit=3)
         assert isinstance(result, list)
+        assert len(result) == 1
+        assert result[0]["id"] == 3
+        assert isinstance(result[0]["sim"], float)
+        assert "title" in result[0]
 
     def test_returns_empty_when_memory_not_found(self):
         cur = _make_cur([])

@@ -202,8 +202,12 @@ def _api_list_memories(project: str = None, tag: str = None,
     if tag:
         conditions.append("%s = ANY(m.tags)")
         params.append(tag)
-    since_dt, _ = _parse_dt(since, "since")
-    before_dt, _ = _parse_dt(before, "before")
+    since_dt, err = _parse_dt(since, "since")
+    if err:
+        raise ValueError(err)
+    before_dt, err = _parse_dt(before, "before")
+    if err:
+        raise ValueError(err)
     if since_dt:
         conditions.append("m.created_at >= %s")
         params.append(since_dt)
