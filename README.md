@@ -6,6 +6,10 @@ Persistent vector memory for Claude Code. Stores your Claude sessions, notes, an
 
 | Date | Feature |
 |------|---------|
+| 2026-05-04 | **Web UI** — single-page React app served at `GET http://localhost:3333/ui`; Timeline River SVG visualization, semantic search with similarity bars, memory detail pane with related memories, full-content reader overlay, preferences dashboard, settings/danger zone |
+| 2026-05-04 | **REST API** — 10 HTTP endpoints (`/api/memories`, `/api/recall`, `/api/stats`, `/api/projects`, `/api/tags`, `/api/preferences`, `/api/memories/:id/related`, etc.) served alongside the MCP server; no separate service needed |
+| 2026-05-04 | **Behavioral preference extraction** — `behavioral_pass.py` runs a targeted LLM pass over already-distilled sessions to extract HOW the user works (`type:behavior` memories); surfaces in a three-tier preference model: explicit → signals → inferred |
+| 2026-05-04 | **Richer distillation prompt** — `distill_sessions.py` Part B now explicitly instructs the model to extract behavioral observations (workflow habits, communication style, decision patterns) tagged `type:behavior` |
 | 2026-04-12 | **`startup_context` tool** — single-call session-start snapshot combining behavioral signals and recent work; no search query needed (inspired by MemPalace layered loading) |
 | 2026-04-12 | **Behavioral signal extraction** — `extract_signals.py` parses session JSONL files without an LLM to produce preference memories from correction signals and pattern memories from tool/command/file habits |
 | 2026-04-11 | **`find_duplicates` + `bulk_delete` tools** — surface near-duplicate memory pairs and soft-delete memories in bulk by tag, project, or source |
