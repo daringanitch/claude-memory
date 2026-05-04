@@ -2,6 +2,8 @@
 
 Persistent vector memory for Claude Code. Stores your Claude sessions, notes, and conversations in a local PostgreSQL database with semantic search — so every new session can recall what you've worked on before. Automatically learns your preferences and working patterns by analysing session behaviour, building a richer picture of how you work over time.
 
+**[Watch the explainer →](https://youtu.be/RudczUqssIo)**
+
 ## What's new
 
 | Date | Feature |
