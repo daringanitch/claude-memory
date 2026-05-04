@@ -26,9 +26,11 @@ Persistent vector memory for Claude Code. Stores your Claude sessions, notes, an
 Two Docker containers:
 
 - **PostgreSQL 16 + pgvector** — stores memories as text + 768-dimensional embeddings
-- **FastMCP server (port 3333)** — exposes 18 tools to Claude via the MCP protocol over SSE
+- **FastMCP server (port 3333)** — exposes 18 MCP tools to Claude over SSE, a REST API with 10 HTTP endpoints, and a browser UI at `GET /ui`
 
 When registered as an MCP server, Claude can search your memory by meaning (`semantic_search`), keyword (`search_memories`), or hybrid scoring (`hybrid_search`) — and save new memories automatically during a session. A connection pool keeps 1–5 persistent DB connections so tool calls are fast.
+
+Open `http://localhost:3333/ui` for a visual browser: Timeline River SVG of your memory history, semantic search with similarity scores, full-content reader overlay, and a Preferences dashboard that surfaces what the system has inferred about how you work.
 
 ## Quick start
 
@@ -166,14 +168,39 @@ docker compose run --rm -T \
 
 Signal memories are tagged `type:preference`, `type:pattern`, or `type:behavior` with `source:signals` so they're distinguishable from distilled or manually saved memories. Aggregate pattern memories are upserted on each run so they stay current as new sessions accumulate.
 
+## Behavioral pass (LLM extraction)
+
+`behavioral_pass.py` runs a targeted LLM pass over already-distilled sessions to extract implicit behavioral observations — HOW the user works, not just what was built. It reads transcripts directly from the original JSONL files on disk (raw messages are deleted from the DB after distillation).
+
+**What it extracts:** workflow habits, tooling instincts, communication style (terse vs. detailed), decision-making speed, quality habits (tests, docs, diffs), correction patterns.
+
+Results are stored as `type:behavior` memories and surface in the **Inferred** tier of `GET /api/preferences` and the Preferences section of the web UI.
+
+```bash
+# Run on all distilled sessions (skips already-processed ones)
+python behavioral_pass.py
+
+# Filter to one project
+python behavioral_pass.py --project my-project
+
+# Preview without writing to DB
+python behavioral_pass.py --dry-run
+
+# Re-run even if behavioral memories already exist
+python behavioral_pass.py --force
+```
+
+Requires Ollama running on the host. Uses `DISTILL_MODEL` env var (default: `qwen2.5:7b`).
+
 ## Auto-import (macOS)
 
 Install a LaunchAgent that runs `import-cron.sh` every hour — importing new Claude Code sessions, distilling them, and extracting behavioral signals automatically:
 
-The hourly pipeline runs three steps in sequence:
+The hourly pipeline runs four steps in sequence:
 1. `import_memories.py` — imports new sessions from `~/.claude/projects`
 2. `distill_sessions.py` — summarises sessions into durable memories via Ollama
 3. `extract_signals.py` — extracts behavioral signals without an LLM
+4. `behavioral_pass.py` — LLM pass over distilled sessions to extract `type:behavior` memories
 
 ```bash
 bash setup-launchagent.sh
@@ -222,10 +249,25 @@ bash restore.sh backups/claude-memory-2026-03-08T12-00-00.pgdump
 
 ### HTTP endpoints
 
+#### Web UI
 | Endpoint | Purpose |
 |----------|---------|
-| `GET /health` | Liveness probe — returns `{"status":"ok"}` (200) or `{"status":"degraded"}` (503) |
-| `POST /cache/invalidate` | Clear the in-process search cache — call after bulk imports to avoid stale results |
+| `GET /ui` | Single-page React app — browse memories, search, read full content, manage preferences |
+
+#### REST API
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/health` | GET | Liveness probe — `{"status":"ok"}` (200) or `{"status":"degraded"}` (503) |
+| `/cache/invalidate` | POST | Clear in-process search cache — call after bulk imports to avoid stale results |
+| `/api/stats` | GET | Memory counts, storage estimate, project count |
+| `/api/projects` | GET | Distinct projects with memory counts |
+| `/api/tags` | GET | All tags with occurrence counts (active memories only) |
+| `/api/memories` | GET | Paginated list. Params: `project`, `tag`, `since`, `before`, `limit`, `offset` |
+| `/api/memories/:id` | GET | Single memory by ID |
+| `/api/memories/:id/related` | GET | Nearest-neighbour memories. Param: `limit` (default 3) |
+| `/api/recall` | POST | Semantic search. Body: `{"query": "...", "threshold": 0.78}` |
+| `/api/preferences` | GET | Behavioral preferences grouped by tier: explicit → signals → inferred |
+| `/api/memories` | DELETE | Bulk soft-delete. Params: `project`, `tag` |
 
 ## Migrations
 
@@ -312,6 +354,10 @@ Indexes: IVFFlat for vector cosine search, GIN for tag arrays and full-text sear
 | `DISTILL_WORKERS` | `4` |
 | `TRANSFORMERS_OFFLINE` | `1` (set in Docker) |
 | `HF_DATASETS_OFFLINE` | `1` (set in Docker) |
+| `GUARD_NOOP_THRESHOLD` | `0.92` — cosine similarity above which `save_memory` is skipped as a duplicate |
+| `GUARD_UPDATE_THRESHOLD` | `0.75` — cosine similarity above which `save_memory` suggests updating instead |
+| `CACHE_MAX_SIZE` | `500` — max entries in the in-process search cache |
+| `CACHE_TTL_SECONDS` | `600` — search cache TTL (10 minutes) |
 
 Data is persisted to `./data/postgres/`. The HuggingFace model cache is stored in a named Docker volume (`model_cache`) so `all-mpnet-base-v2` isn't re-downloaded on restart.
 
