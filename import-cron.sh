@@ -1,6 +1,12 @@
 #!/bin/zsh
 # Auto-import and distill Claude Code sessions into memory DB
 # Run by LaunchAgent every hour
+#
+# Pipeline:
+#   1. import_memories.py   — import new sessions from ~/.claude/projects
+#   2. distill_sessions.py  — extract durable memories via Ollama
+#   3. extract_signals.py   — behavioral signals without an LLM
+#   4. behavioral_pass.py   — LLM behavioral extraction over distilled sessions
 
 LOG=/tmp/claude-memory-import.log
 ERR=/tmp/claude-memory-import-error.log
@@ -43,3 +49,13 @@ $DOCKER compose run --rm -T \
   python /app/extract_signals.py >> "$LOG" 2>&1
 
 echo "[$(date)] Signal extraction complete" >> "$LOG"
+
+# Step 4: Behavioral pass — LLM extraction of HOW the user works (type:behavior memories)
+$DOCKER compose run --rm -T \
+  -e OLLAMA_URL="http://host.docker.internal:11434/v1" \
+  -v "$HOME/.claude/projects:/root/.claude/projects:ro" \
+  -v "$SCRIPT_DIR/behavioral_pass.py:/app/behavioral_pass.py:ro" \
+  mcp-server \
+  python /app/behavioral_pass.py >> "$LOG" 2>&1
+
+echo "[$(date)] Behavioral pass complete" >> "$LOG"

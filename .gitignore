@@ -8,4 +8,5 @@ __pycache__/
 *.log
 .DS_Store
 .superpowers/
+docs/superpowers/
 venv/
