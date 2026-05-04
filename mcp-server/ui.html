@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Claude Memory</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Mulish:wght@400;500;600;700;800;900&family=Cardo:ital@1&display=swap" rel="stylesheet">
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+  <script src="https://unpkg.com/marked/marked.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --cs-blue:       #312888;
+      --cs-blue-hover: #241b7b;
+      --cs-blue-light: #009CFF;
+      --cs-blue-dark:  #1a1560;
+      --cs-coral:      #FF947B;
+      --cs-white:      #ffffff;
+      --cs-grey-light: #f8f7fc;
+      --cs-grey:       #6b6b78;
+      --cs-ink:        #1a1b1c;
+      --fg-1:          var(--cs-blue);
+      --fg-2:          #3d3d4a;
+      --fg-3:          var(--cs-grey);
+      --fg-accent:     var(--cs-blue-light);
+      --border-subtle: rgba(49,40,136,0.12);
+      --border-rule:   var(--cs-blue);
+      --shadow-xs:     0 1px 3px rgba(26,27,28,0.06);
+      --shadow-sm:     0 2px 8px rgba(26,27,28,0.08);
+      --shadow-lg:     0 30px 60px -20px rgba(50,50,93,0.25), 0 18px 36px -18px rgba(0,0,0,0.30);
+      --ease:          cubic-bezier(0.25,1,0.5,1);
+    }
+    body { font-family: 'Mulish', system-ui, sans-serif; background: var(--cs-grey-light); color: var(--fg-2); font-size: 14px; line-height: 1.6; }
+    #root { min-height: 100vh; }
+    .eyebrow { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.14em; color: var(--fg-accent); }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; font-variant-numeric: tabular-nums; }
+    .page-container { max-width: 1440px; margin: 0 auto; }
+    .btn-primary { background: var(--cs-blue); color: #fff; border: 2px solid var(--cs-blue); padding: 8px 16px; font-family: 'Mulish', sans-serif; font-size: 13px; font-weight: 600; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; transition: background 150ms var(--ease), color 150ms var(--ease); }
+    .btn-primary:hover { background: transparent; color: var(--cs-blue); }
+    .btn-outline { background: transparent; color: var(--cs-blue); border: 1.5px solid rgba(49,40,136,0.18); padding: 6px 12px; font-family: 'Mulish', sans-serif; font-size: 12px; font-weight: 600; cursor: pointer; transition: background 150ms var(--ease), color 150ms var(--ease); }
+    .btn-outline:hover { background: var(--cs-blue); color: #fff; }
+    .btn-danger { background: var(--cs-coral); color: #fff; border: 2px solid var(--cs-coral); padding: 6px 12px; font-family: 'Mulish', sans-serif; font-size: 12px; font-weight: 600; cursor: pointer; }
+    .tag-pill { display: inline-block; border: 1.5px solid var(--cs-blue-light); border-radius: 18px; padding: 2px 10px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: var(--cs-blue-light); margin: 2px; }
+    ::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-track { background: transparent; } ::-webkit-scrollbar-thumb { background: rgba(49,40,136,0.15); border-radius: 3px; }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback } = React;
+
+const PROJECT_COLORS = ['#312888','#009CFF','#7A4DFF','#FF947B','#1FA890','#D9325A','#F5A623','#4A90D9'];
+const projectColorCache = {};
+let colorIdx = 0;
+function projectColor(name) {
+  if (!name) return PROJECT_COLORS[0];
+  if (!projectColorCache[name]) projectColorCache[name] = PROJECT_COLORS[colorIdx++ % PROJECT_COLORS.length];
+  return projectColorCache[name];
+}
+
+const KIND_COLORS = {
+  'type:decision':  { border: '#009CFF', bg: 'rgba(0,156,255,0.07)',   label: 'decision' },
+  'type:fix':       { border: '#1FA890', bg: 'rgba(31,168,144,0.10)',  label: 'fix'      },
+  'type:bug':       { border: '#1FA890', bg: 'rgba(31,168,144,0.10)',  label: 'bug'      },
+  'type:pattern':   { border: '#312888', bg: 'rgba(49,40,136,0.05)',   label: 'pattern'  },
+  'type:preference':{ border: '#7A4DFF', bg: 'rgba(122,77,255,0.07)', label: 'pref'     },
+  'type:warning':   { border: '#FF947B', bg: 'rgba(255,148,123,0.12)', label: 'note'     },
+};
+function kindStyle(tags = []) {
+  for (const t of tags) if (KIND_COLORS[t]) return KIND_COLORS[t];
+  return { border: '#009CFF', bg: 'rgba(0,156,255,0.07)', label: 'memory' };
+}
+
+function Eyebrow({ children, style }) {
+  return <div className="eyebrow" style={style}>{children}</div>;
+}
+function MeterBar({ value, color = 'var(--cs-blue-light)', width = 64, height = 3 }) {
+  return (
+    <div style={{ width, height, background: 'rgba(49,40,136,0.12)', borderRadius: 2, overflow: 'hidden', flexShrink: 0 }}>
+      <div style={{ width: `${Math.round(value * 100)}%`, height: '100%', background: color, borderRadius: 2, transition: 'width 320ms var(--ease)' }} />
+    </div>
+  );
+}
+
+function App() {
+  const [status, setStatus] = useState('loading');
+  const [stats, setStats]   = useState(null);
+
+  useEffect(() => {
+    fetch('/health').then(r => r.json()).then(d => setStatus(d.status)).catch(() => setStatus('error'));
+    fetch('/api/stats').then(r => r.json()).then(setStats).catch(() => {});
+  }, []);
+
+  return (
+    <div className="page-container" style={{ background: '#fff', minHeight: '100vh' }}>
+      <div style={{ padding: '40px 32px', textAlign: 'center', color: 'var(--cs-blue)' }}>
+        <div style={{ fontSize: 24, fontWeight: 700 }}>Claude Memory UI</div>
+        <div className="mono" style={{ marginTop: 8, color: 'var(--cs-grey)' }}>
+          Server: {status} · memories: {stats?.active ?? '—'} · projects: {stats?.projects ?? '—'}
+        </div>
+        <div className="mono" style={{ marginTop: 4, color: 'var(--cs-grey)', fontSize: 11 }}>
+          Full UI components load in Tasks 5–10
+        </div>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
