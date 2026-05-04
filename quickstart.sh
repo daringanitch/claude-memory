@@ -94,6 +94,8 @@ fi
 echo ""
 echo "✅ claude-memory is ready."
 echo ""
+echo "  Web UI:   http://localhost:3333/ui"
+echo ""
 echo "  Start a new claude session and try:"
 echo "    list_memories"
 echo "    semantic_search \"your query here\""
