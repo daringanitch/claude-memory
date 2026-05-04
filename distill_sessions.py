@@ -41,27 +41,37 @@ DISTILL_FAILURE_CAP = 3       # sessions that fail this many times are permanent
 DISTILL_PROMPT = """\
 You are extracting durable knowledge from a Claude Code session transcript.
 
-Your job: identify every reusable fact, decision, preference, bug fix, discovered pattern, \
-or architectural insight from this session. Ignore greetings, navigation commands, \
-file listings, and ephemeral details (e.g. "let me check X").
+## Part A — Knowledge extraction
+Identify every reusable fact, decision, preference, bug fix, discovered pattern, or \
+architectural insight. Ignore greetings, navigation commands, file listings, and \
+ephemeral details (e.g. "let me check X").
+
+## Part B — Behavioral extraction (REQUIRED even if Part A is empty)
+Observe HOW the user works, not just WHAT was built. Look for:
+- Workflow habits: do they iterate quickly, prefer large PRs or small ones, test-first or test-after?
+- Tooling preferences: which tools, frameworks, or patterns do they reach for first?
+- Communication style: do they give terse instructions, detailed specs, or correct Claude mid-stream?
+- Decision patterns: do they prefer reversible changes, ask for options, or decide quickly?
+- Quality signals: do they run tests before committing, review diffs carefully, care about docs?
+Include a behavioral memory for ANY pattern you observe, even weak ones.
+Tag behavioral memories with "type:behavior".
 
 Return ONLY a JSON array. Each element must have:
-- "content": a detailed, self-contained memory (2-4 sentences). Include:
-    - The specific file path(s) involved, if relevant
-    - The root cause or reason behind any decision or fix
-    - The exact command, flag, or code pattern used
-    - The "why" — what problem it solved or what constraint it satisfies
-    - Any error message or failure mode that was encountered
-  Do NOT use pronouns without antecedents. Write as if the reader has zero context.
-- "tags": list of 2-5 lowercase keyword tags
+- "content": a self-contained memory (2-4 sentences). Write as if the reader has zero context. \
+  For behavioral memories, start with "The user..." or "This developer...".
+- "tags": list of 2-6 lowercase tags. Use "type:behavior" for behavioral observations, \
+  "preference" for explicit preferences, "decision" for architectural choices, \
+  "bug" or "fix" for defect resolutions.
 
 Example output:
 [
-  {{"content": "All Python package installation on this Mac uses brew (e.g. 'brew install pytest'), not pip install directly. This is because the system Python environment is managed by Homebrew and direct pip installs can conflict with it.", "tags": ["preference", "python", "brew", "macos"]}},
-  {{"content": "FastMCP.run() does not accept host/port kwargs in mcp-server/server.py — they must be passed to the FastMCP() constructor instead (e.g. FastMCP('name', host='0.0.0.0', port=3333)). Passing them to .run() raises a TypeError at startup.", "tags": ["bug", "fastmcp", "pattern", "server"]}}
+  {{"content": "All Python package installation on this Mac uses brew (e.g. 'brew install pytest'), not pip install directly. The system Python on this Mac is managed by Homebrew; direct pip installs are blocked by PEP 668.", "tags": ["preference", "python", "brew", "macos"]}},
+  {{"content": "FastMCP.run() does not accept host/port kwargs — they must be passed to the FastMCP() constructor instead. Passing them to .run() raises a TypeError at startup.", "tags": ["bug", "fastmcp", "pattern", "server"]}},
+  {{"content": "The user consistently opens feature branches before starting any work and pushes a PR when the feature is complete, never committing directly to main. They catch this themselves when reminded mid-session.", "tags": ["type:behavior", "preference", "git", "workflow"]}},
+  {{"content": "This developer prefers terse Claude responses — they skip summaries and ask for direct diffs rather than explanations. They interrupted two summaries in this session.", "tags": ["type:behavior", "preference", "communication"]}}
 ]
 
-If nothing durable was learned, return an empty array: []
+If nothing durable was learned in Part A AND no behavioral patterns were observable, return: []
 
 Project: {project}
 Session ID: {session_id}
