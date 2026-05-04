@@ -11,7 +11,7 @@ Persistent vector memory MCP server for Claude Code. Stores and semantically sea
 Two services, orchestrated by Docker Compose:
 
 - **PostgreSQL 16 + pgvector** (port 5432): Stores memories with 768-dimensional embeddings. Schema initialized by `init.sql`.
-- **FastMCP server** (port 3333): `mcp-server/server.py` exposes 18 MCP tools over SSE. Uses `all-mpnet-base-v2` from sentence-transformers to generate embeddings. A `ThreadedConnectionPool` keeps 1–5 persistent DB connections.
+- **FastMCP server** (port 3333): `mcp-server/server.py` exposes 18 MCP tools over SSE plus a web UI and 10 REST endpoints. Uses `all-mpnet-base-v2` from sentence-transformers to generate embeddings. A `ThreadedConnectionPool` keeps 1–5 persistent DB connections.
 - **Ollama** (port 11434, runs on host): Local LLM used by `distill_sessions.py` for session distillation. No API key required. Recommended model: `qwen2.5:7b`.
 
 The `memories` table has GIN indexes on tags and full-text search, an IVFFlat index for cosine similarity vector search, and an auto-updating `updated_at` trigger. Soft-deletes are tracked via a `deleted_at` column; use `purge_memory` to permanently remove.
@@ -91,6 +91,30 @@ python extract_signals.py --project workspace
 
 Aggregate memories are upserted (`source = signals/aggregate/{type}/{project}`) so they stay current on every run. The `signals_extracted` column on `imported_sessions` tracks which sessions have been processed. Run by `import-cron.sh` as step 3 after distillation.
 
+## Behavioral Pass Script
+
+`behavioral_pass.py` runs a targeted LLM pass over already-distilled sessions to extract implicit behavioral observations — HOW the user works, not just what was built. Reads transcripts from the original JSONL files on disk.
+
+```bash
+# Run on all distilled sessions (skips sessions already processed)
+python behavioral_pass.py
+
+# Filter to one project
+python behavioral_pass.py --project workspace
+
+# Preview without writing
+python behavioral_pass.py --dry-run
+
+# Re-run even if behavioral memories already exist
+python behavioral_pass.py --force
+```
+
+Results are stored as memories tagged `type:behavior` and appear in the **Inferred** tier of `GET /api/preferences` and the Preferences section of the web UI.
+
+**What it extracts:** workflow habits, tooling instincts, communication style, decision-making speed, quality habits (tests, docs, diffs), correction patterns.
+
+Requires Ollama running on the host (`http://localhost:11434`). Uses `DISTILL_MODEL` env var (default: `qwen2.5:7b`).
+
 ## MCP Tools
 
 | Tool | Key Parameters | Purpose |
@@ -116,10 +140,27 @@ Aggregate memories are upserted (`source = signals/aggregate/{type}/{project}`) 
 
 ### HTTP Endpoints
 
+#### Web UI
 | Endpoint | Purpose |
 |----------|---------|
-| `GET /health` | Liveness probe — returns `{"status":"ok"}` (200) or `{"status":"degraded"}` (503) |
-| `POST /cache/invalidate` | Clear the in-process search cache — call after bulk imports |
+| `GET /ui` | Single-page React UI — browse, search, and manage memories in the browser |
+
+Open `http://localhost:3333/ui` after `docker compose up -d`. No build step required.
+
+#### REST API (same origin as MCP server)
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/health` | GET | Liveness probe — `{"status":"ok"}` or `{"status":"degraded"}` |
+| `/cache/invalidate` | POST | Clear in-process search cache — call after bulk imports |
+| `/api/stats` | GET | Memory counts, storage estimate, project count |
+| `/api/projects` | GET | Distinct projects with memory counts |
+| `/api/tags` | GET | All tags with counts (active memories only) |
+| `/api/memories` | GET | Paginated list. Params: `project`, `tag`, `since`, `before`, `limit`, `offset` |
+| `/api/memories/:id` | GET | Single memory by ID |
+| `/api/memories/:id/related` | GET | Nearest-neighbor memories. Param: `limit` (default 3) |
+| `/api/recall` | POST | Semantic search. Body: `{"query": "...", "threshold": 0.78}` |
+| `/api/preferences` | GET | Behavioral preferences grouped by tier: explicit → signals → inferred |
+| `/api/memories` | DELETE | Bulk soft-delete. Params: `project`, `tag` |
 
 ## Configuration
 
