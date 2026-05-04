@@ -1,5 +1,5 @@
 """Tests for REST API helper functions added to server.py."""
-import sys, os, json
+import sys, os
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "mcp-server"))
@@ -53,6 +53,14 @@ class TestApiTags:
             result = server._api_tags()
         assert result == [{"tag": "type:decision", "count": 15}]
 
+    def test_empty_db_returns_empty_list(self):
+        cur = _make_cur([])
+        with patch("server.db_conn") as mock_db:
+            mock_db.return_value.__enter__ = MagicMock(return_value=_make_conn(cur))
+            mock_db.return_value.__exit__ = MagicMock(return_value=False)
+            result = server._api_tags()
+        assert result == []
+
 
 class TestApiStats:
     def test_returns_stats_dict(self):
@@ -65,3 +73,7 @@ class TestApiStats:
         assert result["active"] == 247
         assert result["projects"] == 12
         assert "storage_mb" in result
+        assert result["storage_mb"] == 0.9
+        assert result["storage_breakdown"]["embeddings_mb"] == 0.7
+        assert result["storage_breakdown"]["content_mb"] == 0.1
+        assert result["storage_breakdown"]["metadata_mb"] == 0.0
