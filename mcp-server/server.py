@@ -160,7 +160,9 @@ def _api_tags() -> list:
 
 
 def _api_stats() -> dict:
-    """Aggregate stats: counts, estimated storage, project count."""
+    """Aggregate stats: counts, project count, and estimated storage.
+
+    Storage estimate: 3072 bytes/embedding (768 floats × 4 bytes) + avg content length + 200 bytes metadata overhead. Not from pg_relation_size — treat as approximate."""
     with db_conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
