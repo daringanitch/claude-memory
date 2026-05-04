@@ -172,3 +172,109 @@ class TestApiRelatedMemories:
             mock_db.return_value.__exit__ = MagicMock(return_value=False)
             result = server._api_related_memories(999, limit=3)
         assert result == []
+
+
+class TestApiRecall:
+    def test_returns_ranked_results(self):
+        row = {"id": 7, "content": "auth middleware is driven by compliance",
+               "tags": ["type:decision"], "project": "workspace",
+               "created_at": "2026-04-30T10:00:00", "sim": 0.91}
+        cur = _make_cur([row])
+        with patch("server.db_conn") as mock_db, \
+             patch("server.embed", return_value=[0.0] * 768):
+            mock_db.return_value.__enter__ = MagicMock(return_value=_make_conn(cur))
+            mock_db.return_value.__exit__ = MagicMock(return_value=False)
+            result = server._api_recall("auth compliance", threshold=0.78)
+        assert isinstance(result, list)
+        assert len(result) == 1
+        assert result[0]["id"] == 7
+        assert isinstance(result[0]["sim"], float)
+        assert "title" in result[0]
+        assert "snippet" in result[0]
+
+    def test_empty_query_returns_empty_list(self):
+        result = server._api_recall("", threshold=0.78)
+        assert result == []
+
+    def test_whitespace_only_query_returns_empty_list(self):
+        result = server._api_recall("   ", threshold=0.78)
+        assert result == []
+
+
+class TestApiPreferences:
+    def test_groups_by_category_tag(self):
+        from datetime import datetime, timezone, timedelta
+        recent = (datetime.now(timezone.utc) - timedelta(days=3)).isoformat()
+        rows = [
+            {"id": 1, "content": "Prefers terse responses", "tags": ["type:preference", "category:workflow"],
+             "project": "workspace", "created_at": recent, "updated_at": recent},
+            {"id": 2, "content": "Uses brew Python", "tags": ["type:preference", "category:stack"],
+             "project": "workspace", "created_at": recent, "updated_at": recent},
+        ]
+        cur = _make_cur(rows)
+        with patch("server.db_conn") as mock_db:
+            mock_db.return_value.__enter__ = MagicMock(return_value=_make_conn(cur))
+            mock_db.return_value.__exit__ = MagicMock(return_value=False)
+            result = server._api_preferences()
+        categories = {g["category"] for g in result}
+        assert "workflow" in categories
+        assert "stack" in categories
+
+    def test_confidence_high_for_recent_memories(self):
+        from datetime import datetime, timezone, timedelta
+        recent = (datetime.now(timezone.utc) - timedelta(days=3)).isoformat()
+        rows = [{"id": 1, "content": "Recent pref", "tags": ["type:preference"],
+                 "project": "", "created_at": recent, "updated_at": recent}]
+        cur = _make_cur(rows)
+        with patch("server.db_conn") as mock_db:
+            mock_db.return_value.__enter__ = MagicMock(return_value=_make_conn(cur))
+            mock_db.return_value.__exit__ = MagicMock(return_value=False)
+            result = server._api_preferences()
+        assert result[0]["items"][0]["confidence"] >= 0.9
+
+    def test_confidence_low_for_old_memories(self):
+        from datetime import datetime, timezone, timedelta
+        old = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
+        rows = [{"id": 2, "content": "Old pref", "tags": ["type:preference"],
+                 "project": "", "created_at": old, "updated_at": old}]
+        cur = _make_cur(rows)
+        with patch("server.db_conn") as mock_db:
+            mock_db.return_value.__enter__ = MagicMock(return_value=_make_conn(cur))
+            mock_db.return_value.__exit__ = MagicMock(return_value=False)
+            result = server._api_preferences()
+        assert result[0]["items"][0]["confidence"] == 0.65
+
+    def test_no_preferences_returns_empty_list(self):
+        cur = _make_cur([])
+        with patch("server.db_conn") as mock_db:
+            mock_db.return_value.__enter__ = MagicMock(return_value=_make_conn(cur))
+            mock_db.return_value.__exit__ = MagicMock(return_value=False)
+            result = server._api_preferences()
+        assert result == []
+
+
+class TestApiBulkDelete:
+    def test_dry_run_returns_count_without_deleting(self):
+        cur = _make_cur([])
+        cur.fetchone.return_value = (5,)  # COUNT(*) returns a tuple
+        with patch("server.db_conn") as mock_db:
+            mock_db.return_value.__enter__ = MagicMock(return_value=_make_conn(cur))
+            mock_db.return_value.__exit__ = MagicMock(return_value=False)
+            result = server._api_bulk_delete(project="workspace", tag=None, dry_run=True)
+        assert result["dry_run"] is True
+        assert result["deleted"] == 5
+
+    def test_requires_at_least_one_filter(self):
+        result = server._api_bulk_delete(project=None, tag=None, dry_run=False)
+        assert "error" in result
+
+    def test_live_run_returns_deleted_count(self):
+        cur = _make_cur([])
+        cur.rowcount = 3
+        conn = _make_conn(cur)
+        with patch("server.db_conn") as mock_db:
+            mock_db.return_value.__enter__ = MagicMock(return_value=conn)
+            mock_db.return_value.__exit__ = MagicMock(return_value=False)
+            result = server._api_bulk_delete(project="workspace", tag=None, dry_run=False)
+        assert result["dry_run"] is False
+        assert result["deleted"] == 3
