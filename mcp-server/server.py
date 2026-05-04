@@ -1220,5 +1220,130 @@ def bulk_delete(tag: str = None, project: str = None, source: str = None,
         log.error("bulk_delete failed: %s", e)
         return f"❌ Error: {e}"
 
+# ── REST HTTP route handlers ───────────────────────────────────────────────────
+
+@mcp.custom_route("/ui", methods=["GET"])
+async def serve_ui(request: Request):
+    """Serve the single-file React UI."""
+    from starlette.responses import HTMLResponse
+    import pathlib
+    ui_path = pathlib.Path(__file__).parent / "ui.html"
+    if not ui_path.exists():
+        return JSONResponse({"error": "ui.html not found"}, status_code=404)
+    return HTMLResponse(ui_path.read_text(encoding="utf-8"))
+
+
+@mcp.custom_route("/api/projects", methods=["GET"])
+async def api_projects(request: Request) -> JSONResponse:
+    try:
+        return JSONResponse(_api_projects())
+    except Exception as e:
+        log.error("GET /api/projects failed: %s", e)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/api/tags", methods=["GET"])
+async def api_tags(request: Request) -> JSONResponse:
+    try:
+        return JSONResponse(_api_tags())
+    except Exception as e:
+        log.error("GET /api/tags failed: %s", e)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/api/stats", methods=["GET"])
+async def api_stats(request: Request) -> JSONResponse:
+    try:
+        return JSONResponse(_api_stats())
+    except Exception as e:
+        log.error("GET /api/stats failed: %s", e)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/api/memories", methods=["GET"])
+async def api_memories_list(request: Request) -> JSONResponse:
+    try:
+        q = request.query_params
+        rows = _api_list_memories(
+            project=q.get("project"),
+            tag=q.get("tag"),
+            since=q.get("since"),
+            before=q.get("before"),
+            limit=int(q.get("limit", 50)),
+            offset=int(q.get("offset", 0)),
+        )
+        return JSONResponse(rows)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except Exception as e:
+        log.error("GET /api/memories failed: %s", e)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/api/memories/{id}", methods=["GET"])
+async def api_memory_get(request: Request) -> JSONResponse:
+    try:
+        memory_id = int(request.path_params["id"])
+        row = _api_get_memory(memory_id)
+        if row is None:
+            return JSONResponse({"error": "Not found"}, status_code=404)
+        return JSONResponse(row)
+    except (ValueError, KeyError):
+        return JSONResponse({"error": "Invalid id"}, status_code=400)
+    except Exception as e:
+        log.error("GET /api/memories/%s failed: %s", request.path_params.get("id"), e)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/api/memories/{id}/related", methods=["GET"])
+async def api_memory_related(request: Request) -> JSONResponse:
+    try:
+        memory_id = int(request.path_params["id"])
+        limit = int(request.query_params.get("limit", 3))
+        return JSONResponse(_api_related_memories(memory_id, limit=limit))
+    except (ValueError, KeyError):
+        return JSONResponse({"error": "Invalid id"}, status_code=400)
+    except Exception as e:
+        log.error("GET /api/memories/%s/related failed: %s", request.path_params.get("id"), e)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/api/recall", methods=["POST"])
+async def api_recall(request: Request) -> JSONResponse:
+    try:
+        body = await request.json()
+        query = body.get("query", "")
+        threshold = float(body.get("threshold", 0.78))
+        return JSONResponse(_api_recall(query, threshold=threshold))
+    except Exception as e:
+        log.error("POST /api/recall failed: %s", e)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/api/preferences", methods=["GET"])
+async def api_preferences(request: Request) -> JSONResponse:
+    try:
+        return JSONResponse(_api_preferences())
+    except Exception as e:
+        log.error("GET /api/preferences failed: %s", e)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/api/memories", methods=["DELETE"])
+async def api_memories_delete(request: Request) -> JSONResponse:
+    try:
+        q = request.query_params
+        project = q.get("project")
+        tag = q.get("tag")
+        dry_run = q.get("dry_run", "false").lower() != "false"
+        result = _api_bulk_delete(project=project, tag=tag, dry_run=dry_run)
+        if "error" in result:
+            return JSONResponse(result, status_code=400)
+        return JSONResponse(result)
+    except Exception as e:
+        log.error("DELETE /api/memories failed: %s", e)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 if __name__ == "__main__":
     mcp.run(transport="sse")
