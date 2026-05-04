@@ -190,6 +190,93 @@ def _api_stats() -> dict:
     return row
 
 
+def _api_list_memories(project: str = None, tag: str = None,
+                        since: str = None, before: str = None,
+                        limit: int = 50, offset: int = 0) -> list:
+    """Paginated list of active memories with derived 'title' and 'content_length' fields."""
+    conditions = ["m.deleted_at IS NULL"]
+    params = []
+    if project:
+        conditions.append("m.project = %s")
+        params.append(project)
+    if tag:
+        conditions.append("%s = ANY(m.tags)")
+        params.append(tag)
+    since_dt, _ = _parse_dt(since, "since")
+    before_dt, _ = _parse_dt(before, "before")
+    if since_dt:
+        conditions.append("m.created_at >= %s")
+        params.append(since_dt)
+    if before_dt:
+        conditions.append("m.created_at < %s")
+        params.append(before_dt)
+    where = " AND ".join(conditions)
+    params.extend([limit, offset])
+    with db_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                f"SELECT id, content, tags, source, project, created_at, updated_at "
+                f"FROM memories m WHERE {where} "
+                f"ORDER BY created_at DESC LIMIT %s OFFSET %s",
+                params
+            )
+            rows = [dict(r) for r in cur.fetchall()]
+    for r in rows:
+        c = r["content"]
+        r["title"] = (c[:72] + "…") if len(c) > 72 else c
+        r["content_length"] = len(c)
+        if r.get("created_at"):
+            r["created_at"] = r["created_at"].isoformat() if hasattr(r["created_at"], "isoformat") else r["created_at"]
+        if r.get("updated_at"):
+            r["updated_at"] = r["updated_at"].isoformat() if hasattr(r["updated_at"], "isoformat") else r["updated_at"]
+    return rows
+
+
+def _api_get_memory(memory_id: int) -> dict | None:
+    """Fetch single memory by id. Returns None if not found."""
+    with db_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id, content, tags, source, project, created_at, updated_at, deleted_at "
+                "FROM memories WHERE id = %s",
+                (memory_id,)
+            )
+            row = cur.fetchone()
+    if not row:
+        return None
+    r = dict(row)
+    r["title"] = (r["content"][:72] + "…") if len(r["content"]) > 72 else r["content"]
+    r["content_length"] = len(r["content"])
+    for f in ("created_at", "updated_at", "deleted_at"):
+        if r.get(f) and hasattr(r[f], "isoformat"):
+            r[f] = r[f].isoformat()
+    return r
+
+
+def _api_related_memories(memory_id: int, limit: int = 3) -> list:
+    """Return up to `limit` nearest-neighbor memories to the given memory id."""
+    source = _api_get_memory(memory_id)
+    if not source:
+        return []
+    vec = embed(source["content"])
+    with db_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id, content, tags, project, created_at, "
+                "ROUND((1 - (embedding <=> %s))::numeric, 4) AS sim "
+                "FROM memories WHERE deleted_at IS NULL AND id != %s "
+                "ORDER BY embedding <=> %s LIMIT %s",
+                (vec, memory_id, vec, limit)
+            )
+            rows = [dict(r) for r in cur.fetchall()]
+    for r in rows:
+        r["title"] = (r["content"][:72] + "…") if len(r["content"]) > 72 else r["content"]
+        if r.get("created_at") and hasattr(r["created_at"], "isoformat"):
+            r["created_at"] = r["created_at"].isoformat()
+        r["sim"] = float(r["sim"])
+    return rows
+
+
 # ── Write guard ────────────────────────────────────────────────────────────────
 
 def _write_guard(content: str, vector) -> dict:
