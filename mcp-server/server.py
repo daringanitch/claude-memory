@@ -1124,5 +1124,102 @@ def bulk_delete(tag: str = None, project: str = None, source: str = None,
         return f"❌ Error: {e}"
 
 
+def _api_recall(query: str, threshold: float = 0.78, limit: int = 20) -> list:
+    """Semantic search. Returns ranked list with score and snippet."""
+    if not query.strip():
+        return []
+    vec = embed(query)
+    with db_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id, content, tags, project, created_at, "
+                "ROUND((1 - (embedding <=> %s))::numeric, 4) AS sim "
+                "FROM memories WHERE deleted_at IS NULL "
+                "AND (1 - (embedding <=> %s)) >= %s "
+                "ORDER BY embedding <=> %s LIMIT %s",
+                (vec, vec, threshold, vec, limit)
+            )
+            rows = [dict(r) for r in cur.fetchall()]
+    results = []
+    for r in rows:
+        title = (r["content"][:72] + "…") if len(r["content"]) > 72 else r["content"]
+        snippet = r["content"][:200]
+        if r.get("created_at") and hasattr(r["created_at"], "isoformat"):
+            r["created_at"] = r["created_at"].isoformat()
+        results.append({
+            "id": r["id"],
+            "title": title,
+            "snippet": snippet,
+            "tags": r["tags"],
+            "project": r["project"],
+            "created_at": r["created_at"],
+            "sim": float(r["sim"]),
+        })
+    return results
+
+
+def _api_preferences() -> list:
+    """Return type:preference and type:pattern memories grouped by category tag."""
+    from datetime import datetime, timezone
+    with db_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id, content, tags, project, created_at, updated_at "
+                "FROM memories WHERE deleted_at IS NULL "
+                "AND ('type:preference' = ANY(tags) OR 'type:pattern' = ANY(tags)) "
+                "ORDER BY updated_at DESC"
+            )
+            rows = [dict(r) for r in cur.fetchall()]
+    now = datetime.now(timezone.utc)
+    groups: dict[str, list] = {}
+    for r in rows:
+        cat = next((t.split("category:")[1] for t in r["tags"] if t.startswith("category:")), "general")
+        updated = r["updated_at"]
+        # Normalize to aware datetime regardless of input type (string from tests, datetime from DB)
+        if isinstance(updated, str):
+            try:
+                updated = datetime.fromisoformat(updated)
+            except ValueError:
+                updated = None
+        if updated is not None and hasattr(updated, "tzinfo") and updated.tzinfo is None:
+            updated = updated.replace(tzinfo=timezone.utc)
+        if updated is not None:
+            age_days = (now - updated).days
+        else:
+            age_days = 999
+        confidence = 0.95 if age_days <= 7 else (0.80 if age_days <= 30 else 0.65)
+        source_tag = next((t for t in r["tags"] if t.startswith("source:")), "")
+        source = source_tag.replace("source:", "") if source_tag else r["project"] or "unknown"
+        item = {"text": r["content"], "confidence": confidence, "source": source}
+        groups.setdefault(cat, []).append(item)
+    return [{"category": cat, "items": items} for cat, items in groups.items()]
+
+
+def _api_bulk_delete(project: str = None, tag: str = None, dry_run: bool = True) -> dict:
+    """Soft-delete memories matching project and/or tag filter."""
+    if not project and not tag:
+        return {"error": "At least one filter (project or tag) is required"}
+    conditions = ["deleted_at IS NULL"]
+    params = []
+    if project:
+        conditions.append("project = %s")
+        params.append(project)
+    if tag:
+        conditions.append("%s = ANY(tags)")
+        params.append(tag)
+    where = " AND ".join(conditions)
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            if dry_run:
+                cur.execute(f"SELECT COUNT(*) FROM memories WHERE {where}", params)
+                count = cur.fetchone()[0]
+            else:
+                cur.execute(f"UPDATE memories SET deleted_at = NOW() WHERE {where}", params)
+                count = cur.rowcount
+                conn.commit()
+                _cache_invalidate()
+    return {"deleted": count, "dry_run": dry_run, "project": project, "tag": tag}
+
+
 if __name__ == "__main__":
     mcp.run(transport="sse")
