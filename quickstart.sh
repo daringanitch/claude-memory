@@ -8,7 +8,7 @@
 #   3. Distills sessions into durable memories via local Ollama (if running)
 #   4. Extracts behavioral signals (workflow patterns, preferences) without an LLM
 #   5. Registers the MCP server with Claude Code (user scope — all projects)
-#   6. Optionally installs the hourly auto-import LaunchAgent (macOS)
+#   6. Optionally installs the auto-import LaunchAgent (every 30 min, macOS)
 
 set -euo pipefail
 
@@ -81,7 +81,7 @@ fi
 # ── 6. LaunchAgent (optional, macOS only) ─────────────────────────────────────
 if [[ "$(uname)" == "Darwin" ]]; then
   echo ""
-  printf "▶ Install hourly auto-import LaunchAgent? [y/N]: "
+  printf "▶ Install auto-import LaunchAgent (runs every 30 min)? [y/N]: "
   read -r INSTALL_LA
   if [[ "${INSTALL_LA:-N}" =~ ^[Yy]$ ]]; then
     bash "$SCRIPT_DIR/setup-launchagent.sh"

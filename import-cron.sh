@@ -1,6 +1,6 @@
 #!/bin/zsh
 # Auto-import and distill Claude Code sessions into memory DB
-# Run by LaunchAgent every hour
+# Run by LaunchAgent every 30 minutes
 #
 # Pipeline:
 #   1. import_memories.py   — import new sessions from ~/.claude/projects

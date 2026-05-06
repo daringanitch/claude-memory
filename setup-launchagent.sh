@@ -35,7 +35,7 @@ cat > "$PLIST_PATH" <<PLIST
     </array>
 
     <key>StartInterval</key>
-    <integer>3600</integer>
+    <integer>1800</integer>
 
     <key>RunAtLoad</key>
     <false/>
@@ -64,7 +64,7 @@ if launchctl list | grep -q "$PLIST_NAME" 2>/dev/null; then
 fi
 
 launchctl load "$PLIST_PATH"
-echo "✅ LaunchAgent loaded. Runs every hour."
+echo "✅ LaunchAgent loaded. Runs every 30 minutes."
 echo ""
 echo "Useful commands:"
 echo "  View logs:    tail -f $LOG_DIR/claude-memory-import.log"
