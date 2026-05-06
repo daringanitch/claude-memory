@@ -55,7 +55,7 @@ bash quickstart.sh
 2. Imports your existing `~/.claude/projects` session history
 3. Distills sessions into durable memories using a local Ollama LLM (no API key required)
 4. Registers the MCP server with Claude Code at user scope (available in every project)
-5. Optionally installs the hourly auto-import LaunchAgent (macOS)
+5. Optionally installs the auto-import LaunchAgent (every 30 min, macOS)
 
 Then open a new `claude` session and try `list_memories`.
 
@@ -196,9 +196,9 @@ Requires Ollama running on the host. Uses `DISTILL_MODEL` env var (default: `qwe
 
 ## Auto-import (macOS)
 
-Install a LaunchAgent that runs `import-cron.sh` every hour — importing new Claude Code sessions, distilling them, and extracting behavioral signals automatically:
+Install a LaunchAgent that runs `import-cron.sh` every 30 minutes — importing new Claude Code sessions, distilling them, and extracting behavioral signals automatically:
 
-The hourly pipeline runs four steps in sequence:
+The pipeline runs four steps in sequence:
 1. `import_memories.py` — imports new sessions from `~/.claude/projects`
 2. `distill_sessions.py` — summarises sessions into durable memories via Ollama
 3. `extract_signals.py` — extracts behavioral signals without an LLM
