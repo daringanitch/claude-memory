@@ -29,18 +29,35 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://claude:memory_pass@l
 OLLAMA_URL   = os.environ.get("OLLAMA_URL", "http://localhost:11434/v1")
 MODEL        = os.environ.get("DISTILL_MODEL", "qwen2.5:7b")
 MAX_CHARS    = 20_000
+MIN_MESSAGE_COUNT = 10  # sessions with fewer messages can't show behavioral patterns
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 
 BEHAVIORAL_PROMPT = """\
-Analyze this Claude Code session. Return behavioral observations about HOW the user works.
+Analyze this Claude Code session. Extract behavioral observations about HOW the user works.
 
-Return ONLY a JSON array — no other text. Each element:
-{{"content": "The user... [2-3 sentences, cite specific evidence]", "tags": ["type:behavior", "workflow"]}}
+High bar — only include a memory if ALL three conditions are met:
+1. Specific to this developer (not true of most developers)
+2. Supported by at least two instances in the transcript OR an explicit statement/correction
+3. Actionable — would change how Claude collaborates with them in a future session
 
-Look for: workflow habits, tooling instincts, communication style (terse vs detailed), \
-decision-making speed, quality habits (tests, docs, diffs), correction patterns.
+Self-check: "Could this describe ANY developer? Would a senior engineer find this obvious?"
+If yes to either, skip it.
 
-If no patterns are observable, return: []
+Do NOT capture:
+- One-off actions (typed /exit, gave a single terse reply, said thanks)
+- Generic habits (breaks tasks into steps, iterates, checks output before committing)
+- Neutral tool use (used git, ran tests, opened a file)
+- Session bookkeeping (asked what we were working on, reconnected a service)
+
+Strong examples that DO qualify:
+- "This developer interrupts Claude's trailing summaries and has asked to skip them in multiple sessions."
+- "The user consistently opens a feature branch before starting and self-corrects when they forget — seen 3+ times."
+- "This developer uses brew for Python installs and rejected pip install twice when Claude suggested it."
+
+Return ONLY a JSON array. Each element must cite specific evidence from the transcript.
+{{"content": "The user... [2-3 sentences, cite specific evidence]", "tags": ["type:behavior", ...]}}
+
+If no qualifying patterns are observable, return: []
 
 Project: {project}
 
@@ -126,12 +143,15 @@ def main():
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         if args.project:
             cur.execute(
-                "SELECT session_id, project FROM imported_sessions WHERE distilled = TRUE AND project ILIKE %s ORDER BY imported_at",
-                (f"%{args.project}%",)
+                "SELECT session_id, project, message_count FROM imported_sessions "
+                "WHERE distilled = TRUE AND message_count >= %s AND project ILIKE %s ORDER BY imported_at",
+                (MIN_MESSAGE_COUNT, f"%{args.project}%",)
             )
         else:
             cur.execute(
-                "SELECT session_id, project FROM imported_sessions WHERE distilled = TRUE ORDER BY imported_at"
+                "SELECT session_id, project, message_count FROM imported_sessions "
+                "WHERE distilled = TRUE AND message_count >= %s ORDER BY imported_at",
+                (MIN_MESSAGE_COUNT,)
             )
         sessions = cur.fetchall()
 
