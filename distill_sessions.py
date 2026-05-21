@@ -38,6 +38,7 @@ DEFAULT_WORKERS = int(os.environ.get("DISTILL_WORKERS", "4"))
 MAX_TRANSCRIPT_CHARS = 80_000  # ~20k tokens
 DISTILL_FAILURE_CAP = 3       # sessions that fail this many times are permanently skipped
 MIN_MESSAGE_COUNT = 5         # sessions with fewer messages are skipped as non-substantive
+DISTILL_DEDUP_THRESHOLD = 0.85  # cosine similarity above which a new memory is skipped as near-duplicate
 
 DISTILL_PROMPT = """\
 You are extracting durable knowledge from a Claude Code session transcript.
@@ -105,6 +106,29 @@ def embed_batch(texts, embedder):
     """Batch-embed a list of texts. Thread-safe via lock."""
     with _embed_lock:
         return embedder.encode(texts, normalize_embeddings=True, batch_size=64)
+
+
+def filter_near_dupes(conn, contents, vectors, session_prefix, threshold=DISTILL_DEDUP_THRESHOLD):
+    """Return (contents, vectors) with near-duplicates of existing memories removed."""
+    keep_contents, keep_vectors = [], []
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        for content, vector in zip(contents, vectors):
+            cur.execute(
+                "SELECT id, content, ROUND((1 - (embedding <=> %s::vector))::numeric, 4) AS sim "
+                "FROM memories WHERE deleted_at IS NULL "
+                "ORDER BY embedding <=> %s::vector LIMIT 1",
+                (vector, vector),
+            )
+            row = cur.fetchone()
+            if row and row["sim"] >= threshold:
+                log.info(
+                    "  [%s] dedup skip (sim=%.3f vs #%d): %s...",
+                    session_prefix, row["sim"], row["id"], content[:60],
+                )
+            else:
+                keep_contents.append(content)
+                keep_vectors.append(vector)
+    return keep_contents, keep_vectors
 
 
 def get_pending_sessions(conn, project_filter=None):
@@ -242,8 +266,22 @@ def distill_session(embedder, client, model, session, dry_run=False):
         contents, all_tags = zip(*valid)
         vectors = embed_batch(list(contents), embedder)
 
+        # Drop new memories that are near-duplicates of what's already stored
+        deduped_contents, deduped_vectors = filter_near_dupes(conn, list(contents), list(vectors), session_prefix)
+        if not deduped_contents:
+            log.info("  [%s] All memories were near-dupes — nothing new to store", session_prefix)
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM memories WHERE source = %s", (f"claude-code/{session_prefix}",))
+                cur.execute("UPDATE imported_sessions SET distilled = TRUE WHERE session_id = %s", (session_id,))
+            conn.commit()
+            return 0
+
+        # Rebuild all_tags aligned to deduped contents
+        tag_by_content = dict(zip(contents, all_tags))
+        deduped_tags = [tag_by_content[c] for c in deduped_contents]
+
         rows = []
-        for content, item_tags, vector in zip(contents, all_tags, vectors):
+        for content, item_tags, vector in zip(deduped_contents, deduped_tags, deduped_vectors):
             tags = ["distilled", f"project:{project}"] + [t for t in item_tags if t != "distilled"]
             rows.append((content, tags, f"distilled/{session_prefix}", project, vector))
 

@@ -22,8 +22,8 @@ mcp = FastMCP("claude-memory", host="0.0.0.0", port=3333)
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://claude:memory_pass@localhost:5432/memory")
 
 # ── Write guard thresholds ─────────────────────────────────────────────────────
-GUARD_NOOP_THRESHOLD   = 0.92  # identical meaning → skip
-GUARD_UPDATE_THRESHOLD = 0.75  # very similar → suggest update instead
+GUARD_NOOP_THRESHOLD   = float(os.environ.get("GUARD_NOOP_THRESHOLD",   "0.85"))  # identical meaning → skip
+GUARD_UPDATE_THRESHOLD = float(os.environ.get("GUARD_UPDATE_THRESHOLD", "0.75"))  # very similar → suggest update instead
 
 # ── Search cache ───────────────────────────────────────────────────────────────
 CACHE_MAX_SIZE    = 500   # max entries across all queries
@@ -449,9 +449,9 @@ def save_memory(content: str, tags: list[str] = [], source: str = "claude-code",
                 # Semantic dedup check — only against active (non-deleted) memories
                 cur.execute(
                     "SELECT id, content, ROUND((1 - (embedding <=> %s))::numeric, 4) AS sim "
-                    "FROM memories WHERE (1 - (embedding <=> %s)) >= 0.92 AND deleted_at IS NULL "
+                    "FROM memories WHERE (1 - (embedding <=> %s)) >= %s AND deleted_at IS NULL "
                     "ORDER BY embedding <=> %s LIMIT 1",
-                    (vector, vector, vector)
+                    (vector, GUARD_NOOP_THRESHOLD, vector)
                 )
                 dup = cur.fetchone()
                 if dup:
@@ -859,7 +859,7 @@ def startup_context(project: str = None) -> str:
 @mcp.tool()
 def update_memory(memory_id: int, content: str = None, tags: list[str] = None, force: bool = False) -> str:
     """Update content and/or tags. Re-embeds if content changes.
-    Returns a warning (without saving) if new content is ≥0.92 similar to an existing memory.
+    Returns a warning (without saving) if new content is above GUARD_NOOP_THRESHOLD similar to an existing memory.
     Pass force=True to bypass the duplicate check and save anyway."""
     if not content and tags is None:
         return "❌ Provide at least one of: content, tags"
@@ -872,11 +872,11 @@ def update_memory(memory_id: int, content: str = None, tags: list[str] = None, f
                     cur.execute(
                         "SELECT id, content, ROUND((1 - (embedding <=> %s))::numeric, 4) AS sim "
                         "FROM memories "
-                        "WHERE (1 - (embedding <=> %s)) >= 0.92 "
+                        "WHERE (1 - (embedding <=> %s)) >= %s "
                         "AND id != %s "
                         "AND deleted_at IS NULL "
                         "ORDER BY embedding <=> %s LIMIT 1",
-                        (new_vector, new_vector, memory_id, new_vector)
+                        (new_vector, GUARD_NOOP_THRESHOLD, memory_id, new_vector)
                     )
                     dup = cur.fetchone()
                     if dup:

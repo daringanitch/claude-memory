@@ -161,3 +161,56 @@ class TestGetPendingSessionsFiltersCapped:
         params = cur.execute.call_args[0][1]
         assert "message_count" in sql
         assert ds.MIN_MESSAGE_COUNT in params
+
+
+class TestFilterNearDupes:
+    def _make_conn(self, sim):
+        conn = MagicMock()
+        cur = MagicMock()
+        cur.__enter__ = MagicMock(return_value=cur)
+        cur.__exit__ = MagicMock(return_value=False)
+        cur.fetchone.return_value = {"id": 1, "content": "existing memory", "sim": sim}
+        conn.cursor.return_value = cur
+        return conn
+
+    def test_drops_near_duplicate(self):
+        conn = self._make_conn(sim=0.90)
+        contents, vectors = ds.filter_near_dupes(conn, ["new memory"], [[0.1, 0.2]], "abc123")
+        assert contents == []
+        assert vectors == []
+
+    def test_keeps_distinct_memory(self):
+        conn = self._make_conn(sim=0.50)
+        contents, vectors = ds.filter_near_dupes(conn, ["new memory"], [[0.1, 0.2]], "abc123")
+        assert contents == ["new memory"]
+
+    def test_keeps_at_threshold_boundary(self):
+        # Exactly at threshold — should be dropped (>=)
+        conn = self._make_conn(sim=ds.DISTILL_DEDUP_THRESHOLD)
+        contents, vectors = ds.filter_near_dupes(conn, ["new memory"], [[0.1, 0.2]], "abc123")
+        assert contents == []
+
+    def test_no_existing_memories(self):
+        conn = MagicMock()
+        cur = MagicMock()
+        cur.__enter__ = MagicMock(return_value=cur)
+        cur.__exit__ = MagicMock(return_value=False)
+        cur.fetchone.return_value = None
+        conn.cursor.return_value = cur
+        contents, vectors = ds.filter_near_dupes(conn, ["new memory"], [[0.1, 0.2]], "abc123")
+        assert contents == ["new memory"]
+
+    def test_mixed_keeps_and_drops(self):
+        conn = MagicMock()
+        cur = MagicMock()
+        cur.__enter__ = MagicMock(return_value=cur)
+        cur.__exit__ = MagicMock(return_value=False)
+        cur.fetchone.side_effect = [
+            {"id": 1, "content": "existing", "sim": 0.95},  # drop
+            {"id": 2, "content": "other",    "sim": 0.40},  # keep
+        ]
+        conn.cursor.return_value = cur
+        contents, vectors = ds.filter_near_dupes(
+            conn, ["memory a", "memory b"], [[0.1], [0.2]], "abc123"
+        )
+        assert contents == ["memory b"]
