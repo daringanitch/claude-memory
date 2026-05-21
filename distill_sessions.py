@@ -37,6 +37,7 @@ DEFAULT_MODEL = os.environ.get("DISTILL_MODEL", "qwen2.5:7b")
 DEFAULT_WORKERS = int(os.environ.get("DISTILL_WORKERS", "4"))
 MAX_TRANSCRIPT_CHARS = 80_000  # ~20k tokens
 DISTILL_FAILURE_CAP = 3       # sessions that fail this many times are permanently skipped
+MIN_MESSAGE_COUNT = 5         # sessions with fewer messages are skipped as non-substantive
 
 DISTILL_PROMPT = """\
 You are extracting durable knowledge from a Claude Code session transcript.
@@ -46,14 +47,25 @@ Identify every reusable fact, decision, preference, bug fix, discovered pattern,
 architectural insight. Ignore greetings, navigation commands, file listings, and \
 ephemeral details (e.g. "let me check X").
 
-## Part B — Behavioral extraction (REQUIRED even if Part A is empty)
-Observe HOW the user works, not just WHAT was built. Look for:
-- Workflow habits: do they iterate quickly, prefer large PRs or small ones, test-first or test-after?
-- Tooling preferences: which tools, frameworks, or patterns do they reach for first?
-- Communication style: do they give terse instructions, detailed specs, or correct Claude mid-stream?
-- Decision patterns: do they prefer reversible changes, ask for options, or decide quickly?
-- Quality signals: do they run tests before committing, review diffs carefully, care about docs?
-Include a behavioral memory for ANY pattern you observe, even weak ones.
+## Part B — Behavioral extraction (high bar — omit if nothing qualifies)
+Include a behavioral memory ONLY when you observe a pattern that meets ALL of these:
+1. Specific to this developer — not true of most developers
+2. Supported by at least two instances in the transcript, OR an explicit statement/correction
+3. Actionable — would change how Claude collaborates with them in a future session
+
+Self-check before including: "Could this describe ANY developer? Would a senior engineer find this obvious?" If yes to either, skip it.
+
+Do NOT capture:
+- One-off actions (typed /exit, said thanks, gave a single terse reply)
+- Generic habits (breaks work into steps, iterates on features, checks output)
+- Neutral observations (used git, ran tests, opened a file, checked Docker)
+- Session bookkeeping (asked what we were working on, reconnected MCP)
+
+Strong examples that DO qualify:
+- "This developer explicitly rejects post-task summaries and interrupts them mid-response — observed in multiple sessions. Skip trailing recaps."
+- "The user always opens a feature branch before starting work and self-corrects when they forget — confirmed across 3+ sessions."
+- "This developer uses brew for all Python installs and rejected pip install twice when Claude suggested it."
+
 Tag behavioral memories with "type:behavior".
 
 Return ONLY a JSON array. Each element must have:
@@ -100,14 +112,14 @@ def get_pending_sessions(conn, project_filter=None):
         if project_filter:
             cur.execute(
                 "SELECT session_id, project, message_count, distill_failures FROM imported_sessions "
-                "WHERE distilled = FALSE AND distill_failures < %s AND project ILIKE %s ORDER BY imported_at",
-                (DISTILL_FAILURE_CAP, f"%{project_filter}%",)
+                "WHERE distilled = FALSE AND distill_failures < %s AND message_count >= %s AND project ILIKE %s ORDER BY imported_at",
+                (DISTILL_FAILURE_CAP, MIN_MESSAGE_COUNT, f"%{project_filter}%",)
             )
         else:
             cur.execute(
                 "SELECT session_id, project, message_count, distill_failures FROM imported_sessions "
-                "WHERE distilled = FALSE AND distill_failures < %s ORDER BY imported_at",
-                (DISTILL_FAILURE_CAP,)
+                "WHERE distilled = FALSE AND distill_failures < %s AND message_count >= %s ORDER BY imported_at",
+                (DISTILL_FAILURE_CAP, MIN_MESSAGE_COUNT,)
             )
         return cur.fetchall()
 

@@ -135,3 +135,29 @@ class TestGetPendingSessionsFiltersCapped:
         sql = cur.execute.call_args[0][0]
         assert "distill_failures" in sql
         assert "ILIKE" in sql
+
+    def test_query_excludes_short_sessions(self):
+        conn = MagicMock()
+        cur = MagicMock()
+        cur.__enter__ = MagicMock(return_value=cur)
+        cur.__exit__ = MagicMock(return_value=False)
+        cur.fetchall.return_value = []
+        conn.cursor.return_value = cur
+        ds.get_pending_sessions(conn)
+        sql = cur.execute.call_args[0][0]
+        params = cur.execute.call_args[0][1]
+        assert "message_count" in sql
+        assert ds.MIN_MESSAGE_COUNT in params
+
+    def test_query_excludes_short_sessions_with_project(self):
+        conn = MagicMock()
+        cur = MagicMock()
+        cur.__enter__ = MagicMock(return_value=cur)
+        cur.__exit__ = MagicMock(return_value=False)
+        cur.fetchall.return_value = []
+        conn.cursor.return_value = cur
+        ds.get_pending_sessions(conn, project_filter="myproject")
+        sql = cur.execute.call_args[0][0]
+        params = cur.execute.call_args[0][1]
+        assert "message_count" in sql
+        assert ds.MIN_MESSAGE_COUNT in params
