@@ -137,3 +137,36 @@ class TestBuildToolingSection:
         assert "git, gh" in result
         assert "server.py" in result
         assert "execution (50%)" in result
+
+
+class TestRenderProfile:
+    def test_includes_header(self):
+        result = gup.render_profile(["## Preferences\n- Use brew."])
+        assert "# User Profile" in result
+        assert "do not edit" in result
+        assert "auto-updated" in result
+
+    def test_includes_section_content(self):
+        result = gup.render_profile(["## Preferences\n- Use brew."])
+        assert "## Preferences" in result
+        assert "- Use brew." in result
+
+    def test_skips_none_sections(self):
+        result = gup.render_profile([None, "## Preferences\n- x", None])
+        assert result.count("##") == 1
+
+    def test_no_sections_shows_placeholder(self):
+        result = gup.render_profile([None, None])
+        assert "No memories" in result
+
+    def test_sections_separated_by_blank_line(self):
+        result = gup.render_profile(["## Identity\n- x", "## Preferences\n- y"])
+        assert "\n\n## Preferences" in result
+
+
+class TestEmptySectionOmitted:
+    def test_none_not_rendered(self):
+        result = gup.render_profile([None])
+        assert "## Identity" not in result
+        assert "## Preferences" not in result
+        assert "## Working Style" not in result

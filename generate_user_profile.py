@@ -216,6 +216,16 @@ def build_tooling_section(rows):
     return "## Tooling\n" + "\n".join(lines)
 
 
+def render_profile(sections):
+    """Assemble the full user.md content from a list of section strings (None entries skipped)."""
+    today = date.today().isoformat()
+    header = f"# User Profile\n_Generated {today} · auto-updated every 30 min · do not edit_\n"
+    body_parts = [s for s in sections if s]
+    if not body_parts:
+        return header + "\n_No memories found yet. Save some memories first._\n"
+    return header + "\n" + "\n\n".join(body_parts) + "\n"
+
+
 def get_db():
     conn = psycopg2.connect(DATABASE_URL)
     conn.autocommit = False
