@@ -167,6 +167,55 @@ def build_active_projects_section(contents):
     return "## Active Projects\n" + "\n".join(f"- {item}" for item in items)
 
 
+def query_tooling(conn):
+    """Return signal rows tagged commands, files, or workflow."""
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            "SELECT content, tags FROM memories "
+            "WHERE 'source:signals' = ANY(tags) AND deleted_at IS NULL "
+            "AND (tags && ARRAY['commands', 'files', 'workflow']) "
+            "ORDER BY created_at DESC LIMIT 10"
+        )
+        return cur.fetchall()
+
+
+def _extract_after_colon(text):
+    """Return text after the first colon, stripped."""
+    if ":" in text:
+        return text.split(":", 1)[1].strip().rstrip(".")
+    return text.strip()
+
+
+def build_tooling_section(rows):
+    """Return markdown ## Tooling section, or None if empty."""
+    commands_line = files_line = workflow_line = None
+    for row in rows:
+        tags = row["tags"] or []
+        first_line = row["content"].split("\n")[0]
+        if "commands" in tags and commands_line is None:
+            commands_line = _extract_after_colon(first_line)
+        elif "files" in tags and files_line is None:
+            files_line = _extract_after_colon(first_line)
+        elif "workflow" in tags and workflow_line is None:
+            # Extract the part after "tool categories —" if present
+            after_colon = _extract_after_colon(first_line)
+            if "tool categories" in after_colon:
+                workflow_line = after_colon.split("tool categories")[-1].lstrip(" —").strip()
+            else:
+                workflow_line = after_colon
+
+    lines = []
+    if commands_line:
+        lines.append(f"- **Common commands:** {commands_line}")
+    if files_line:
+        lines.append(f"- **Frequent files:** {files_line}")
+    if workflow_line:
+        lines.append(f"- **Workflow:** {workflow_line}")
+    if not lines:
+        return None
+    return "## Tooling\n" + "\n".join(lines)
+
+
 def get_db():
     conn = psycopg2.connect(DATABASE_URL)
     conn.autocommit = False

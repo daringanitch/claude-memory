@@ -96,3 +96,44 @@ class TestBuildActiveProjectsSection:
         result = gup.build_active_projects_section(["x" * 300])
         bullet = [line for line in result.splitlines() if line.startswith("- ")][0]
         assert len(bullet) <= 203  # "- " + 200 chars + possible truncation marker
+
+
+class TestBuildToolingSection:
+    def _row(self, tags, content):
+        return {"tags": tags, "content": content}
+
+    def test_extracts_commands(self):
+        rows = [self._row(["commands", "source:signals"],
+                          "Common shell commands in project 'workspace': git, gh, docker.")]
+        result = gup.build_tooling_section(rows)
+        assert "## Tooling" in result
+        assert "git, gh, docker" in result
+        assert "Common commands" in result
+
+    def test_extracts_files(self):
+        rows = [self._row(["files", "source:signals"],
+                          "Frequently accessed files in project 'workspace': server.py, README.md.")]
+        result = gup.build_tooling_section(rows)
+        assert "server.py" in result
+        assert "Frequent files" in result
+
+    def test_extracts_workflow(self):
+        rows = [self._row(["workflow", "source:signals"],
+                          "Workflow pattern for project 'workspace' (8 sessions): tool categories — execution (54%).")]
+        result = gup.build_tooling_section(rows)
+        assert "execution (54%)" in result
+        assert "Workflow" in result
+
+    def test_empty_returns_none(self):
+        assert gup.build_tooling_section([]) is None
+
+    def test_all_three_signals(self):
+        rows = [
+            self._row(["commands", "source:signals"], "Common shell commands in project 'x': git, gh."),
+            self._row(["files",    "source:signals"], "Frequently accessed files in project 'x': server.py."),
+            self._row(["workflow", "source:signals"], "Workflow pattern for project 'x' (1 sessions): tool categories — execution (50%)."),
+        ]
+        result = gup.build_tooling_section(rows)
+        assert "git, gh" in result
+        assert "server.py" in result
+        assert "execution (50%)" in result
