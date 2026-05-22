@@ -55,8 +55,10 @@ def query_identity(conn):
             name = tag[len("project:"):]
             if name not in projects:
                 projects.append(name)
-        elif tag.lower() in TECH_TAGS and tag.capitalize() not in stack:
-            stack.append(tag.capitalize() if tag.islower() else tag)
+        elif tag.lower() in TECH_TAGS:
+            normalized = tag.capitalize() if tag.islower() else tag
+            if normalized not in stack:
+                stack.append(normalized)
     return projects[:6], stack[:8]
 
 
