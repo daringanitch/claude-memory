@@ -39,6 +39,39 @@ CLAUDE_MD_SECTION = (
 )
 
 
+def query_identity(conn):
+    """Return (top_projects, stack_tags) counted from all active memory tags."""
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            "SELECT unnest(tags) AS tag, COUNT(*) AS cnt "
+            "FROM memories WHERE deleted_at IS NULL "
+            "GROUP BY tag ORDER BY cnt DESC"
+        )
+        rows = cur.fetchall()
+    projects, stack = [], []
+    for row in rows:
+        tag = row["tag"]
+        if tag.startswith("project:"):
+            name = tag[len("project:"):]
+            if name not in projects:
+                projects.append(name)
+        elif tag.lower() in TECH_TAGS and tag.capitalize() not in stack:
+            stack.append(tag.capitalize() if tag.islower() else tag)
+    return projects[:6], stack[:8]
+
+
+def build_identity_section(projects, stack):
+    """Return markdown ## Identity section, or None if no data."""
+    lines = []
+    if projects:
+        lines.append(f"- **Active projects:** {', '.join(projects)}")
+    if stack:
+        lines.append(f"- **Stack:** {', '.join(stack)}")
+    if not lines:
+        return None
+    return "## Identity\n" + "\n".join(lines)
+
+
 def get_db():
     conn = psycopg2.connect(DATABASE_URL)
     conn.autocommit = False
