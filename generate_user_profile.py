@@ -252,7 +252,40 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Print to stdout instead of writing file")
     parser.add_argument("--output", default=str(OUTPUT_PATH), help=f"Output path (default: {OUTPUT_PATH})")
     args = parser.parse_args()
+
     log.info("generate_user_profile starting (dry_run=%s)", args.dry_run)
+
+    conn = get_db()
+    try:
+        projects, stack    = query_identity(conn)
+        preferences        = query_preferences(conn)
+        working_style      = query_working_style(conn)
+        active_projects    = query_active_projects(conn)
+        tooling_rows       = query_tooling(conn)
+    finally:
+        conn.close()
+
+    sections = [
+        build_identity_section(projects, stack),
+        build_preferences_section(preferences),
+        build_working_style_section(working_style),
+        build_active_projects_section(active_projects),
+        build_tooling_section(tooling_rows),
+    ]
+
+    content = render_profile(sections)
+
+    if args.dry_run:
+        print(content)
+        return
+
+    output_path = Path(args.output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(content, encoding="utf-8")
+    log.info("Written %d bytes to %s", len(content), output_path)
+
+    patch_claude_md()
+    log.info("Done")
 
 
 if __name__ == "__main__":
