@@ -79,7 +79,7 @@ def _first_substantive_line(content):
 
     Auto-memory files have a short title paragraph followed by the actual preference.
     Skip single-paragraph lines that look like titles (no sentence-ending punctuation,
-    no code markers, and shorter than 35 chars).
+    no code markers, and shorter than 40 chars).
     """
     paras = [p.strip() for p in content.split("\n\n") if p.strip()]
     # If there are multiple paragraphs, the first may be a title — skip it
@@ -108,6 +108,7 @@ def _first_substantive_line(content):
 def query_preferences(conn):
     """Return content strings for type:preference memories, auto-memory rows first."""
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        # Boolean expression in ORDER BY: True > False in Postgres, so DESC puts auto-memory rows first
         cur.execute(
             "SELECT content FROM memories "
             "WHERE 'type:preference' = ANY(tags) AND deleted_at IS NULL "
