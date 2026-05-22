@@ -119,6 +119,25 @@ Requires Ollama running on the host (`http://localhost:11434`). Uses `DISTILL_MO
 - `distill_sessions.py` skips sessions with fewer than 5 messages (`MIN_MESSAGE_COUNT`) and deduplicates new memories against existing ones at ≥0.85 cosine similarity (`DISTILL_DEDUP_THRESHOLD`)
 - `behavioral_pass.py` skips sessions with fewer than 10 messages — behavioral patterns cannot be observed in short exchanges
 
+## User Profile Script
+
+`generate_user_profile.py` synthesizes distilled memories into `~/.claude/user.md` — a stable profile loaded by CLAUDE.md at the start of every session. No LLM or embeddings required.
+
+```bash
+# Write to ~/.claude/user.md (default)
+python generate_user_profile.py
+
+# Preview without writing
+python generate_user_profile.py --dry-run
+
+# Custom output path
+python generate_user_profile.py --output /path/to/user.md
+```
+
+Sections generated: **Identity** (active projects + stack inferred from tags), **Preferences** (`type:preference`), **Working Style** (`type:behavior`), **Active Projects** (`type:project`), **Tooling** (signal memories).
+
+On first run, automatically prepends a `## User Profile` section to `~/.claude/CLAUDE.md` pointing to the file. Idempotent — safe to run repeatedly.
+
 ## MCP Tools
 
 | Tool | Key Parameters | Purpose |
