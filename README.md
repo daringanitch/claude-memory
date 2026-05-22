@@ -8,6 +8,7 @@ Persistent vector memory for Claude Code. Stores your Claude sessions, notes, an
 
 | Date | Feature |
 |------|---------|
+| 2026-05-22 | **Distillation quality improvements** — minimum message-count filters (5 for distill, 10 for behavioral pass) prevent noise from short sessions; post-distill semantic dedup (`DISTILL_DEDUP_THRESHOLD=0.85`) skips same-fact-different-wording duplicates; `GUARD_NOOP_THRESHOLD` lowered 0.92→0.85 and now env-configurable |
 | 2026-05-04 | **Web UI** — single-page React app served at `GET http://localhost:3333/ui`; Timeline River SVG visualization, semantic search with similarity bars, memory detail pane with related memories, full-content reader overlay, preferences dashboard, settings/danger zone |
 | 2026-05-04 | **REST API** — 10 HTTP endpoints (`/api/memories`, `/api/recall`, `/api/stats`, `/api/projects`, `/api/tags`, `/api/preferences`, `/api/memories/:id/related`, etc.) served alongside the MCP server; no separate service needed |
 | 2026-05-04 | **Behavioral preference extraction** — `behavioral_pass.py` runs a targeted LLM pass over already-distilled sessions to extract HOW the user works (`type:behavior` memories); surfaces in a three-tier preference model: explicit → signals → inferred |
@@ -194,6 +195,10 @@ python behavioral_pass.py --force
 
 Requires Ollama running on the host. Uses `DISTILL_MODEL` env var (default: `qwen2.5:7b`).
 
+**Quality filters applied automatically:**
+- Sessions with fewer than 10 messages are skipped — behavioral patterns can't be observed in short exchanges
+- `distill_sessions.py` skips sessions with fewer than 5 messages and deduplicates new memories against existing ones at ≥0.85 cosine similarity
+
 ## Auto-import (macOS)
 
 Install a LaunchAgent that runs `import-cron.sh` every 30 minutes — importing new Claude Code sessions, distilling them, and extracting behavioral signals automatically:
@@ -229,7 +234,7 @@ bash restore.sh backups/claude-memory-2026-03-08T12-00-00.pgdump
 | Tool | Key Parameters | Description |
 |------|---------------|-------------|
 | `startup_context` | `project` | **Session-start snapshot** — behavioral signals + recent distilled memories in one compact call; no search query needed |
-| `save_memory` | `content`, `tags[]`, `source`, `project` | Save a note; auto-deduplicates at ≥0.92 cosine similarity |
+| `save_memory` | `content`, `tags[]`, `source`, `project` | Save a note; auto-deduplicates at ≥0.85 cosine similarity |
 | `check_memory` | `content` | Dry-run write guard — returns ADD/UPDATE/NOOP with nearest match preview |
 | `semantic_search` | `query`, `limit`, `min_similarity`, `project`, `since`, `before` | Search by **meaning** using vector cosine similarity (cached 10 min) |
 | `search_memories` | `query`, `limit`, `project`, `since`, `before` | Search by **keyword** using PostgreSQL full-text search (cached 10 min) |
@@ -356,8 +361,9 @@ Indexes: IVFFlat for vector cosine search, GIN for tag arrays and full-text sear
 | `DISTILL_WORKERS` | `4` |
 | `TRANSFORMERS_OFFLINE` | `1` (set in Docker) |
 | `HF_DATASETS_OFFLINE` | `1` (set in Docker) |
-| `GUARD_NOOP_THRESHOLD` | `0.92` — cosine similarity above which `save_memory` is skipped as a duplicate |
+| `GUARD_NOOP_THRESHOLD` | `0.85` — cosine similarity above which `save_memory`/`update_memory` is skipped as a duplicate |
 | `GUARD_UPDATE_THRESHOLD` | `0.75` — cosine similarity above which `save_memory` suggests updating instead |
+| `DISTILL_DEDUP_THRESHOLD` | `0.85` — cosine similarity above which a newly distilled memory is skipped as near-duplicate of an existing one |
 | `CACHE_MAX_SIZE` | `500` — max entries in the in-process search cache |
 | `CACHE_TTL_SECONDS` | `600` — search cache TTL (10 minutes) |
 

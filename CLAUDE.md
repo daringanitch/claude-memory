@@ -115,6 +115,10 @@ Results are stored as memories tagged `type:behavior` and appear in the **Inferr
 
 Requires Ollama running on the host (`http://localhost:11434`). Uses `DISTILL_MODEL` env var (default: `qwen2.5:7b`).
 
+**Quality filters applied automatically:**
+- `distill_sessions.py` skips sessions with fewer than 5 messages (`MIN_MESSAGE_COUNT`) and deduplicates new memories against existing ones at ≥0.85 cosine similarity (`DISTILL_DEDUP_THRESHOLD`)
+- `behavioral_pass.py` skips sessions with fewer than 10 messages — behavioral patterns cannot be observed in short exchanges
+
 ## MCP Tools
 
 | Tool | Key Parameters | Purpose |
@@ -175,8 +179,9 @@ Open `http://localhost:3333/ui` after `docker compose up -d`. No build step requ
 | `DISTILL_WORKERS` | `4` | Parallel sessions during distillation |
 | `TRANSFORMERS_OFFLINE` | `1` (in Docker) | Prevents HuggingFace network calls on restart |
 | `HF_DATASETS_OFFLINE` | `1` (in Docker) | Prevents HuggingFace datasets network calls on restart |
-| `GUARD_NOOP_THRESHOLD` | `0.92` | Cosine similarity above which save/update is skipped as duplicate |
+| `GUARD_NOOP_THRESHOLD` | `0.85` | Cosine similarity above which `save_memory`/`update_memory` is skipped as duplicate |
 | `GUARD_UPDATE_THRESHOLD` | `0.75` | Cosine similarity above which save suggests update instead |
+| `DISTILL_DEDUP_THRESHOLD` | `0.85` | Cosine similarity above which a newly distilled memory is skipped as near-duplicate of an existing one |
 | `CACHE_MAX_SIZE` | `500` | Max entries in the in-process search cache |
 | `CACHE_TTL_SECONDS` | `600` | Search cache TTL (10 minutes) |
 
@@ -186,7 +191,7 @@ Data is persisted to `./data/postgres/` on the host. The HuggingFace model cache
 
 ```bash
 brew install pytest   # one-time
-pytest tests/ -v      # 76 tests, no Docker or GPU required
+pytest tests/ -v      # 106 tests, no Docker or GPU required
 ```
 
 All heavy dependencies (sentence-transformers, psycopg2, openai) are mocked by `tests/conftest.py`.
