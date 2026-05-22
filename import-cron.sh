@@ -59,3 +59,8 @@ $DOCKER compose run --rm -T \
   python /app/behavioral_pass.py >> "$LOG" 2>&1
 
 echo "[$(date)] Behavioral pass complete" >> "$LOG"
+
+# Step 5: Generate user profile at ~/.claude/user.md
+"$SCRIPT_DIR/venv/bin/python" "$SCRIPT_DIR/generate_user_profile.py" >> "$LOG" 2>&1
+
+echo "[$(date)] User profile generation complete" >> "$LOG"

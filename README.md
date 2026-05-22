@@ -8,6 +8,7 @@ Persistent vector memory for Claude Code. Stores your Claude sessions, notes, an
 
 | Date | Feature |
 |------|---------|
+| 2026-05-22 | **`user.md` profile generator** — `generate_user_profile.py` synthesizes distilled memories into `~/.claude/user.md` (identity, preferences, working style, active projects, tooling); auto-patches `~/.claude/CLAUDE.md` on first run; runs as step 5 in the 30-min cron pipeline |
 | 2026-05-22 | **Distillation quality improvements** — minimum message-count filters (5 for distill, 10 for behavioral pass) prevent noise from short sessions; post-distill semantic dedup (`DISTILL_DEDUP_THRESHOLD=0.85`) skips same-fact-different-wording duplicates; `GUARD_NOOP_THRESHOLD` lowered 0.92→0.85 and now env-configurable |
 | 2026-05-04 | **Web UI** — single-page React app served at `GET http://localhost:3333/ui`; Timeline River SVG visualization, semantic search with similarity bars, memory detail pane with related memories, full-content reader overlay, preferences dashboard, settings/danger zone |
 | 2026-05-04 | **REST API** — 10 HTTP endpoints (`/api/memories`, `/api/recall`, `/api/stats`, `/api/projects`, `/api/tags`, `/api/preferences`, `/api/memories/:id/related`, etc.) served alongside the MCP server; no separate service needed |
