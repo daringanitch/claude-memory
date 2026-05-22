@@ -74,3 +74,25 @@ class TestBuildWorkingStyleSection:
         result = gup.build_working_style_section(["x" * 200])
         bullet = [line for line in result.splitlines() if line.startswith("- ")][0]
         assert len(bullet) <= 163
+
+
+class TestBuildActiveProjectsSection:
+    def test_renders_bullet_list(self):
+        contents = ["Enterprise OSINT Platform — Flask backend, React frontend."]
+        result = gup.build_active_projects_section(contents)
+        assert "## Active Projects" in result
+        assert "- Enterprise OSINT Platform" in result
+
+    def test_empty_returns_none(self):
+        assert gup.build_active_projects_section([]) is None
+
+    def test_multiple_projects(self):
+        contents = ["Project A — description A.", "Project B — description B."]
+        result = gup.build_active_projects_section(contents)
+        assert "- Project A" in result
+        assert "- Project B" in result
+
+    def test_truncates_long_lines(self):
+        result = gup.build_active_projects_section(["x" * 300])
+        bullet = [line for line in result.splitlines() if line.startswith("- ")][0]
+        assert len(bullet) <= 203  # "- " + 200 chars + possible truncation marker

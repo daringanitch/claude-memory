@@ -147,6 +147,26 @@ def build_working_style_section(contents):
     return "## Working Style\n" + "\n".join(f"- {item}" for item in items)
 
 
+def query_active_projects(conn):
+    """Return content strings for type:project memories."""
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            "SELECT content FROM memories "
+            "WHERE 'type:project' = ANY(tags) AND deleted_at IS NULL "
+            "ORDER BY created_at DESC LIMIT 5"
+        )
+        return [r["content"] for r in cur.fetchall()]
+
+
+def build_active_projects_section(contents):
+    """Return markdown ## Active Projects section, or None if empty."""
+    items = [_first_substantive_line(c)[:200] for c in contents if c.strip()]
+    items = [i for i in items if i]
+    if not items:
+        return None
+    return "## Active Projects\n" + "\n".join(f"- {item}" for item in items)
+
+
 def get_db():
     conn = psycopg2.connect(DATABASE_URL)
     conn.autocommit = False
