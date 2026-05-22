@@ -28,3 +28,26 @@ class TestBuildIdentitySection:
 
     def test_empty_returns_none(self):
         assert gup.build_identity_section([], []) is None
+
+
+class TestBuildPreferencesSection:
+    def test_renders_bullet_list(self):
+        result = gup.build_preferences_section(["Use brew for Python.", "Open a feature branch."])
+        assert "## Preferences" in result
+        assert "- Use brew for Python." in result
+        assert "- Open a feature branch." in result
+
+    def test_empty_returns_none(self):
+        assert gup.build_preferences_section([]) is None
+
+    def test_auto_memory_format_extracts_preference_not_title(self):
+        # auto-memory content has a short title line, then the actual preference
+        content = "Python packaging preference\n\nAlways use `brew` for Python.\n\n**Why:** ...\n"
+        result = gup.build_preferences_section([content])
+        assert "Python packaging preference" not in result
+        assert "Always use `brew`" in result
+
+    def test_truncates_long_lines(self):
+        result = gup.build_preferences_section(["x" * 200])
+        bullet = [line for line in result.splitlines() if line.startswith("- ")][0]
+        assert len(bullet) <= 163  # "- " + 160 chars + possible truncation marker
