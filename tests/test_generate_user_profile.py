@@ -51,3 +51,26 @@ class TestBuildPreferencesSection:
         result = gup.build_preferences_section(["x" * 200])
         bullet = [line for line in result.splitlines() if line.startswith("- ")][0]
         assert len(bullet) <= 163  # "- " + 160 chars + possible truncation marker
+
+
+class TestBuildWorkingStyleSection:
+    def test_renders_bullet_list(self):
+        contents = ["Prefers terse responses.", "Opens feature branches first."]
+        result = gup.build_working_style_section(contents)
+        assert "## Working Style" in result
+        assert "- Prefers terse responses." in result
+        assert "- Opens feature branches first." in result
+
+    def test_empty_returns_none(self):
+        assert gup.build_working_style_section([]) is None
+
+    def test_uses_first_substantive_line(self):
+        content = "Short title\n\nThe user prefers terse responses — skips summaries."
+        result = gup.build_working_style_section([content])
+        assert "Short title" not in result
+        assert "The user prefers terse" in result
+
+    def test_truncates_long_lines(self):
+        result = gup.build_working_style_section(["x" * 200])
+        bullet = [line for line in result.splitlines() if line.startswith("- ")][0]
+        assert len(bullet) <= 163
