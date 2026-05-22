@@ -170,3 +170,40 @@ class TestEmptySectionOmitted:
         assert "## Identity" not in result
         assert "## Preferences" not in result
         assert "## Working Style" not in result
+
+
+import tempfile
+
+class TestPatchClaudeMd:
+    def test_adds_section_when_missing(self, tmp_path):
+        claude_md = tmp_path / "CLAUDE.md"
+        claude_md.write_text("# Existing content\n")
+        gup.patch_claude_md(claude_md)
+        content = claude_md.read_text()
+        assert gup.CLAUDE_MD_MARKER in content
+        assert "# Existing content" in content
+
+    def test_prepends_section_before_existing_content(self, tmp_path):
+        claude_md = tmp_path / "CLAUDE.md"
+        claude_md.write_text("# Existing\n")
+        gup.patch_claude_md(claude_md)
+        content = claude_md.read_text()
+        assert content.index(gup.CLAUDE_MD_MARKER) < content.index("# Existing")
+
+    def test_does_not_duplicate_section(self, tmp_path):
+        claude_md = tmp_path / "CLAUDE.md"
+        claude_md.write_text(f"{gup.CLAUDE_MD_MARKER}\nSome content\n")
+        gup.patch_claude_md(claude_md)
+        assert claude_md.read_text().count(gup.CLAUDE_MD_MARKER) == 1
+
+    def test_creates_file_if_absent(self, tmp_path):
+        claude_md = tmp_path / "CLAUDE.md"
+        assert not claude_md.exists()
+        gup.patch_claude_md(claude_md)
+        assert claude_md.exists()
+        assert gup.CLAUDE_MD_MARKER in claude_md.read_text()
+
+    def test_creates_parent_dirs_if_absent(self, tmp_path):
+        claude_md = tmp_path / "nested" / "CLAUDE.md"
+        gup.patch_claude_md(claude_md)
+        assert claude_md.exists()

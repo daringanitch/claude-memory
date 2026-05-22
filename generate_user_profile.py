@@ -226,6 +226,21 @@ def render_profile(sections):
     return header + "\n" + "\n\n".join(body_parts) + "\n"
 
 
+def patch_claude_md(path=None):
+    """Prepend User Profile section to CLAUDE.md if not already present. Idempotent."""
+    target = Path(path) if path is not None else CLAUDE_MD_PATH
+    if target.exists():
+        existing = target.read_text(encoding="utf-8")
+        if CLAUDE_MD_MARKER in existing:
+            return
+        new_content = CLAUDE_MD_SECTION + existing
+    else:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        new_content = CLAUDE_MD_SECTION
+    target.write_text(new_content, encoding="utf-8")
+    log.info("Patched %s with User Profile section", target)
+
+
 def get_db():
     conn = psycopg2.connect(DATABASE_URL)
     conn.autocommit = False
