@@ -58,7 +58,7 @@ def get_db():
 
 
 def embed(text):
-    return embedder.encode(text, normalize_embeddings=True)
+    return embedder.encode(text, normalize_embeddings=True, show_progress_bar=False)
 
 
 def insert_memory(cur, content, tags, source, project="", created_at=None):
@@ -178,6 +178,9 @@ def import_claude_code(project_filter=None, min_length=50):
             if not messages:
                 continue
 
+            # Heartbeat before encoding — large sessions (>50 msgs) can take 5–30s
+            # to embed; without this, the user sees no activity between sessions.
+            log.info("  Processing session %s (%d messages, embedding...)", session_id[:8], len(messages))
             try:
                 with conn.cursor() as cur:
                     for role, text, created_at in messages:

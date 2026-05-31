@@ -87,7 +87,7 @@ def ensure_migration(conn):
 
 
 def embed(text, embedder):
-    return embedder.encode(text, normalize_embeddings=True)
+    return embedder.encode(text, normalize_embeddings=True, show_progress_bar=False)
 
 
 def insert_memory(cur, content, tags, source, project, embedder):

@@ -105,7 +105,7 @@ def get_db():
 def embed_batch(texts, embedder):
     """Batch-embed a list of texts. Thread-safe via lock."""
     with _embed_lock:
-        return embedder.encode(texts, normalize_embeddings=True, batch_size=64)
+        return embedder.encode(texts, normalize_embeddings=True, batch_size=64, show_progress_bar=False)
 
 
 def filter_near_dupes(conn, contents, vectors, session_prefix, threshold=DISTILL_DEDUP_THRESHOLD):

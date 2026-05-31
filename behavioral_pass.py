@@ -211,7 +211,7 @@ def main():
             continue
 
         contents, all_tags = zip(*valid)
-        vectors = embedder.encode(list(contents), normalize_embeddings=True, batch_size=32)
+        vectors = embedder.encode(list(contents), normalize_embeddings=True, batch_size=32, show_progress_bar=False)
 
         with conn.cursor() as cur:
             for content, tags, vector in zip(contents, all_tags, vectors):
