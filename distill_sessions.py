@@ -31,6 +31,13 @@ logging.basicConfig(
 )
 log = logging.getLogger("distill")
 
+# Silence third-party INFO chatter that drowns out real per-session progress.
+# httpx logs every HTTP request (one per LLM call), and sentence-transformers
+# emits a model-load chunk on import. Both are noise at the user level — keep
+# WARNING+ so genuine problems still surface.
+for noisy in ("httpx", "httpcore", "openai", "urllib3", "sentence_transformers"):
+    logging.getLogger(noisy).setLevel(logging.WARNING)
+
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://claude:memory_pass@localhost:5432/memory")
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/v1")
 DEFAULT_MODEL = os.environ.get("DISTILL_MODEL", "qwen2.5:7b")

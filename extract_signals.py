@@ -37,6 +37,12 @@ logging.basicConfig(
 )
 log = logging.getLogger("signals")
 
+# Silence third-party INFO chatter that drowns out real progress (sentence-
+# transformers emits a model-load chunk on import). Keep WARNING+ so genuine
+# problems still surface.
+for noisy in ("httpx", "httpcore", "openai", "urllib3", "sentence_transformers"):
+    logging.getLogger(noisy).setLevel(logging.WARNING)
+
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://claude:memory_pass@localhost:5432/memory")
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 
