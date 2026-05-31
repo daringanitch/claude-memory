@@ -301,11 +301,14 @@ def distill_session(embedder, client, model, session, dry_run=False):
             response = call_ollama(client, model, project, session_prefix, transcript)
             memories = parse_distilled(response)
         except json.JSONDecodeError as e:
-            log.error("  [%s] JSON parse error: %s — keeping raws", session_prefix, e)
+            # Not a true ERROR — graceful handling: increment failure-cap, keep raws,
+            # session will be retried on next run (unless cap reached). WARNING so the
+            # event is visible without implying user action is needed.
+            log.warning("  [%s] JSON parse error: %s — keeping raws", session_prefix, e)
             _increment_failures(conn, session_id, session_prefix)
             return 0
         except Exception as e:
-            log.error("  [%s] LLM error: %s — keeping raws", session_prefix, e)
+            log.warning("  [%s] LLM error: %s — keeping raws", session_prefix, e)
             _increment_failures(conn, session_id, session_prefix)
             return 0
 

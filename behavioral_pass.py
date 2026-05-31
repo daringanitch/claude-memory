@@ -193,7 +193,9 @@ def main():
                 continue
             memories = json.loads(raw_text[start:end + 1])
         except Exception as e:
-            log.error("  [%s] error: %s", prefix, e)
+            # Not a true ERROR — graceful continue; LLM may return non-JSON occasionally.
+            # WARNING so the event is visible without implying user action is needed.
+            log.warning("  [%s] LLM/parse error: %s", prefix, e)
             continue
 
         log.info("  [%s] → %d behavioral observations", prefix, len(memories))

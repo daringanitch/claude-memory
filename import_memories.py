@@ -133,11 +133,16 @@ def import_claude_code(project_filter=None, min_length=50):
         project_short = project_name.split("/")[-1]
         log.info("Project: %s (%d session(s))", project_name, len(jsonl_files))
 
+        skipped = 0
+        imported = 0
+
         for jsonl_path in jsonl_files:
             session_id = jsonl_path.stem
 
             if is_session_already_processed(conn, session_id):
-                log.info("  Skipping %s (already distilled)", session_id[:8])
+                # Quiet per-session at DEBUG; aggregate count summarized after the loop.
+                log.debug("  Skipping %s (already distilled)", session_id[:8])
+                skipped += 1
                 continue
 
             messages = []
@@ -191,12 +196,18 @@ def import_claude_code(project_filter=None, min_length=50):
                 conn.commit()
                 record_session(conn, session_id, project_short, len(messages))
                 log.info("  Imported session %s (%d messages)", session_id[:8], len(messages))
+                imported += 1
             except psycopg2.Error as e:
                 conn.rollback()
                 log.error("  DB error in %s: %s", jsonl_path.name, e)
             except Exception as e:
                 conn.rollback()
                 log.error("  Unexpected error in %s: %s", jsonl_path.name, e)
+
+        # Per-project summary: aggregate the per-session Skipping noise into one line
+        if skipped or imported:
+            log.info("Project %s: imported %d, skipped %d (already distilled)",
+                     project_name, imported, skipped)
 
     conn.close()
     log.info("Imported %d messages from Claude Code sessions.", total)
