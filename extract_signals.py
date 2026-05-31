@@ -45,6 +45,15 @@ log = logging.getLogger("signals")
 for noisy in ("httpx", "httpcore", "openai", "urllib3", "sentence_transformers"):
     logging.getLogger(noisy).setLevel(logging.WARNING)
 
+
+def progress(msg):
+    """User-facing progress line — bypasses LOGLEVEL filtering so it stays
+    visible at any -Verbosity. Use this for per-session/per-project status
+    and run summaries. Reserve log.info() for diagnostic events that the
+    user may want suppressed at low verbosity."""
+    import time
+    print(f"{time.strftime('%Y-%m-%dT%H:%M:%S')}  {msg}", flush=True)
+
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://claude:memory_pass@localhost:5432/memory")
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 
@@ -338,7 +347,7 @@ def process_session(conn, session_id, project, embedder, dry_run=False):
     saved = 0
 
     for content in memories:
-        log.info("  [%s] Preference: %s", session_id[:8], content[:120])
+        progress(f"  [{session_id[:8]}] Preference: {content[:120]}")
         if not dry_run:
             tags = ["type:preference", f"project:{project}", "source:signals", "correction"]
             try:
@@ -377,8 +386,7 @@ def run_project_aggregate(conn, project, embedder, dry_run=False):
         sessions_found += 1
 
     if sessions_found < MIN_SESSIONS_FOR_AGGREGATE or not all_tool_calls:
-        log.info("  [%s] %d sessions found — skipping aggregate (min %d)",
-                 project, sessions_found, MIN_SESSIONS_FOR_AGGREGATE)
+        progress(f"  [{project}] {sessions_found} sessions found — skipping aggregate (min {MIN_SESSIONS_FOR_AGGREGATE})")
         return 0
 
     cat_counts, tool_counts = tool_category_summary(all_tool_calls)
@@ -402,7 +410,7 @@ def run_project_aggregate(conn, project, embedder, dry_run=False):
         )
         tags = ["type:pattern", "type:behavior", f"project:{project}", "source:signals", "workflow"]
         source = f"signals/aggregate/workflow/{project}"
-        log.info("  [%s] Workflow pattern: %s", project, content[:120])
+        progress(f"  [{project}] Workflow pattern: {content[:120]}")
         if not dry_run:
             upsert_aggregate_memory(conn, content, tags, source, project, embedder)
         saved += 1
@@ -416,7 +424,7 @@ def run_project_aggregate(conn, project, embedder, dry_run=False):
         )
         tags = ["type:pattern", f"project:{project}", "source:signals", "commands"]
         source = f"signals/aggregate/commands/{project}"
-        log.info("  [%s] Command pattern: %s", project, content[:120])
+        progress(f"  [{project}] Command pattern: {content[:120]}")
         if not dry_run:
             upsert_aggregate_memory(conn, content, tags, source, project, embedder)
         saved += 1
@@ -430,13 +438,12 @@ def run_project_aggregate(conn, project, embedder, dry_run=False):
         )
         tags = ["type:pattern", f"project:{project}", "source:signals", "files"]
         source = f"signals/aggregate/files/{project}"
-        log.info("  [%s] File hotspots: %s", project, content[:120])
+        progress(f"  [{project}] File hotspots: {content[:120]}")
         if not dry_run:
             upsert_aggregate_memory(conn, content, tags, source, project, embedder)
         saved += 1
 
-    log.info("  [%s] %d aggregate pattern memories %s",
-             project, saved, "would be saved" if dry_run else "saved/updated")
+    progress(f"  [{project}] {saved} aggregate pattern memories {'would be saved' if dry_run else 'saved/updated'}")
     return saved
 
 
@@ -460,12 +467,12 @@ def main():
     sessions = get_pending_sessions(conn, args.project)
 
     if not sessions:
-        log.info("No sessions pending signal extraction.")
+        progress("No sessions pending signal extraction.")
         conn.close()
         return
 
     mode = "[DRY RUN] " if args.dry_run else ""
-    log.info("%s=== Extracting signals from %d session(s) ===", mode, len(sessions))
+    progress(f"{mode}=== Extracting signals from {len(sessions)} session(s) ===")
 
     projects_touched = set()
     total_preferences = 0
@@ -478,7 +485,7 @@ def main():
         projects_touched.add(project)
 
     # Refresh project-level aggregate patterns for every affected project
-    log.info("%s=== Updating aggregates for %d project(s) ===", mode, len(projects_touched))
+    progress(f"{mode}=== Updating aggregates for {len(projects_touched)} project(s) ===")
     for project in sorted(projects_touched):
         run_project_aggregate(conn, project, embedder, args.dry_run)
 

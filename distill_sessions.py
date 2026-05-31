@@ -40,6 +40,15 @@ log = logging.getLogger("distill")
 for noisy in ("httpx", "httpcore", "openai", "urllib3", "sentence_transformers"):
     logging.getLogger(noisy).setLevel(logging.WARNING)
 
+
+def progress(msg):
+    """User-facing progress line — bypasses LOGLEVEL filtering so it stays
+    visible at any -Verbosity. Use this for per-session heartbeats, section
+    headers, and run summaries. Reserve log.info() for diagnostic events
+    that the user may want suppressed at low verbosity."""
+    import time
+    print(f"{time.strftime('%Y-%m-%dT%H:%M:%S')}  {msg}", flush=True)
+
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://claude:memory_pass@localhost:5432/memory")
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/v1")
 DEFAULT_MODEL = os.environ.get("DISTILL_MODEL", "qwen2.5:7b")
@@ -292,7 +301,7 @@ def distill_session(embedder, client, model, session, dry_run=False):
     try:
         raw_messages = get_raw_messages(conn, session_prefix)
         if not raw_messages:
-            log.info("  [%s] No raw messages — marking distilled", session_prefix)
+            progress(f"  [{session_prefix}] No raw messages — marking distilled")
             if not dry_run:
                 with conn.cursor() as cur:
                     cur.execute(
@@ -303,8 +312,7 @@ def distill_session(embedder, client, model, session, dry_run=False):
             return 0
 
         transcript = build_transcript(raw_messages)
-        log.info("  [%s] Calling %s (%d chars, %d messages)...",
-                 session_prefix, model, len(transcript), len(raw_messages))
+        progress(f"  [{session_prefix}] Calling {model} ({len(transcript)} chars, {len(raw_messages)} messages)...")
 
         try:
             response = call_ollama(client, model, project, session_prefix, transcript)
@@ -321,7 +329,7 @@ def distill_session(embedder, client, model, session, dry_run=False):
             _increment_failures(conn, session_id, session_prefix)
             return 0
 
-        log.info("  [%s] → %d memories extracted", session_prefix, len(memories))
+        progress(f"  [{session_prefix}] → {len(memories)} memories extracted")
 
         if dry_run:
             for i, m in enumerate(memories, 1):
@@ -349,7 +357,7 @@ def distill_session(embedder, client, model, session, dry_run=False):
         # Drop new memories that are near-duplicates of what's already stored
         deduped_contents, deduped_vectors = filter_near_dupes(conn, list(contents), list(vectors), session_prefix)
         if not deduped_contents:
-            log.info("  [%s] All memories were near-dupes — nothing new to store", session_prefix)
+            progress(f"  [{session_prefix}] All memories were near-dupes — nothing new to store")
             with conn.cursor() as cur:
                 cur.execute("DELETE FROM memories WHERE source = %s", (f"claude-code/{session_prefix}",))
                 cur.execute("UPDATE imported_sessions SET distilled = TRUE WHERE session_id = %s", (session_id,))
@@ -379,7 +387,7 @@ def distill_session(embedder, client, model, session, dry_run=False):
                     (session_id,)
                 )
             conn.commit()
-            log.info("  [%s] Done: %d memories stored", session_prefix, len(rows))
+            progress(f"  [{session_prefix}] Done: {len(rows)} memories stored")
             return len(rows)
         except psycopg2.Error as e:
             conn.rollback()
@@ -436,12 +444,11 @@ def main():
     conn.close()
 
     if not sessions:
-        log.info("No pending sessions to distill.")
+        progress("No pending sessions to distill.")
         return
 
     mode = "[DRY RUN] " if args.dry_run else ""
-    log.info("%s=== Distilling %d session(s) | workers=%d | model=%s ===",
-             mode, len(sessions), args.workers, args.model)
+    progress(f"{mode}=== Distilling {len(sessions)} session(s) | workers={args.workers} | model={args.model} ===")
 
     total = 0
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
@@ -456,8 +463,7 @@ def main():
             except Exception as e:
                 log.error("Session %s failed: %s", s["session_id"][:8], e)
 
-    log.info("%sDone. %d distilled memories %sstored.",
-             mode, total, "would be " if args.dry_run else "")
+    progress(f"{mode}Done. {total} distilled memories {'would be ' if args.dry_run else ''}stored.")
 
 
 if __name__ == "__main__":

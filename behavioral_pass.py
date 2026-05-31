@@ -37,6 +37,15 @@ log = logging.getLogger("behavioral_pass")
 for noisy in ("httpx", "httpcore", "openai", "urllib3", "sentence_transformers"):
     logging.getLogger(noisy).setLevel(logging.WARNING)
 
+
+def progress(msg):
+    """User-facing progress line — bypasses LOGLEVEL filtering so it stays
+    visible at any -Verbosity. Use this for per-session heartbeats and run
+    summaries. Reserve log.info() for diagnostic events that the user may
+    want suppressed at low verbosity."""
+    import time
+    print(f"{time.strftime('%Y-%m-%dT%H:%M:%S')}  {msg}", flush=True)
+
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://claude:memory_pass@localhost:5432/memory")
 OLLAMA_URL   = os.environ.get("OLLAMA_URL", "http://localhost:11434/v1")
 MODEL        = os.environ.get("DISTILL_MODEL", "qwen2.5:7b")
@@ -167,7 +176,7 @@ def main():
             )
         sessions = cur.fetchall()
 
-    log.info("Found %d distilled sessions", len(sessions))
+    progress(f"Found {len(sessions)} distilled sessions")
     total_written = 0
 
     for session in sessions:
@@ -176,20 +185,20 @@ def main():
         prefix     = session_id[:8]
 
         if not args.force and already_has_behavioral(conn, prefix):
-            log.info("  [%s] already processed — skip (--force to redo)", prefix)
+            progress(f"  [{prefix}] already processed — skip (--force to redo)")
             continue
 
         jsonl_path = find_jsonl(session_id)
         if jsonl_path is None:
-            log.info("  [%s] JSONL not found on disk — skipping", prefix)
+            progress(f"  [{prefix}] JSONL not found on disk — skipping")
             continue
 
         transcript = build_transcript_from_jsonl(jsonl_path)
         if not transcript.strip():
-            log.info("  [%s] empty transcript — skipping", prefix)
+            progress(f"  [{prefix}] empty transcript — skipping")
             continue
 
-        log.info("  [%s] %s — %d chars, calling %s...", prefix, project, len(transcript), MODEL)
+        progress(f"  [{prefix}] {project} — {len(transcript)} chars, calling {MODEL}...")
 
         prompt = BEHAVIORAL_PROMPT.format(project=project, session_id=prefix, transcript=transcript)
         try:
@@ -201,7 +210,7 @@ def main():
             raw_text = response.choices[0].message.content.strip()
             start, end = raw_text.find("["), raw_text.rfind("]")
             if start == -1 or end == -1:
-                log.info("  [%s] no JSON array in response — skipping", prefix)
+                progress(f"  [{prefix}] no JSON array in response — skipping")
                 continue
             memories = json.loads(raw_text[start:end + 1])
         except Exception as e:
@@ -210,7 +219,7 @@ def main():
             log.warning("  [%s] LLM/parse error: %s", prefix, e)
             continue
 
-        log.info("  [%s] → %d behavioral observations", prefix, len(memories))
+        progress(f"  [{prefix}] → {len(memories)} behavioral observations")
 
         if args.dry_run:
             for m in memories:
@@ -240,10 +249,10 @@ def main():
                 )
         conn.commit()
         total_written += len(valid)
-        log.info("  [%s] wrote %d behavioral memories", prefix, len(valid))
+        progress(f"  [{prefix}] wrote {len(valid)} behavioral memories")
 
     conn.close()
-    log.info("Done — %d total behavioral memories written", total_written)
+    progress(f"Done — {total_written} total behavioral memories written")
 
 
 if __name__ == "__main__":
