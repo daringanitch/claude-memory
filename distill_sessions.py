@@ -25,7 +25,9 @@ from pgvector.psycopg2 import register_vector
 from sentence_transformers import SentenceTransformer
 
 logging.basicConfig(
-    level=logging.INFO,
+    # Honor LOGLEVEL env var (set by Invoke-ImportPipeline.ps1's -Verbosity flag);
+    # fall back to INFO so direct python invocations keep the original behavior.
+    level=os.environ.get("LOGLEVEL", "INFO").upper(),
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     datefmt="%Y-%m-%dT%H:%M:%S",
 )

@@ -21,8 +21,13 @@ from openai import OpenAI
 from pgvector.psycopg2 import register_vector
 from sentence_transformers import SentenceTransformer
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s",
-                    datefmt="%Y-%m-%dT%H:%M:%S")
+logging.basicConfig(
+    # Honor LOGLEVEL env var (set by Invoke-ImportPipeline.ps1's -Verbosity flag);
+    # fall back to INFO so direct python invocations keep the original behavior.
+    level=os.environ.get("LOGLEVEL", "INFO").upper(),
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%S",
+)
 log = logging.getLogger("behavioral_pass")
 
 # Silence third-party INFO chatter that drowns out real per-session progress.
