@@ -67,10 +67,13 @@ services:
       timeout: 5s
       retries: 3
       start_period: 60s
+    # NOTE: mcp-server depends only on the DB. It does NOT depend on ollama —
+    # the server itself makes no LLM calls (distillation runs in ephemeral
+    # `docker compose run` containers; search/recall need only Postgres).
+    # Keeping ollama out of depends_on decouples lifecycles so ollama/GPU
+    # changes don't cascade-recreate mcp-server and sever the MCP SSE session.
     depends_on:
       db:
-        condition: service_healthy
-      ollama:
         condition: service_healthy
 
 volumes:
