@@ -175,13 +175,81 @@ def call_ollama(client, model, project, session_id, transcript):
     return response.choices[0].message.content
 
 
+# Bounds for validated memory items. The distillation prompt asks for
+# 2-4 sentence content and 2-6 short lowercase tags; these caps reject items
+# that fall well outside that contract (which can happen if the model glitches
+# or if a malicious transcript tries to inject an oversized payload).
+_MAX_CONTENT_CHARS = 4000
+_MAX_TAGS = 16
+_MAX_TAG_LEN = 80
+
+
+def _valid_memory_item(item):
+    """Return True if item conforms to the {content, tags?} schema.
+
+    Defence-in-depth against prompt-injected output from distillation: a
+    malicious transcript could instruct the model to emit JSON, but the items
+    still have to pass this filter before they reach the database. Invalid
+    items are dropped rather than crashing the whole session.
+    """
+    if not isinstance(item, dict):
+        return False
+    content = item.get("content")
+    if not isinstance(content, str):
+        return False
+    stripped = content.strip()
+    if not stripped or len(stripped) > _MAX_CONTENT_CHARS:
+        return False
+    tags = item.get("tags", [])
+    if not isinstance(tags, list) or len(tags) > _MAX_TAGS:
+        return False
+    for t in tags:
+        if not isinstance(t, str) or not t or len(t) > _MAX_TAG_LEN:
+            return False
+    return True
+
+
 def parse_distilled(response_text):
+    """Extract a JSON array of validated memory items from an LLM response.
+
+    Uses json.JSONDecoder.raw_decode() to locate and parse the first valid
+    JSON array of objects, stopping exactly at the array's closing bracket.
+    This correctly handles:
+    - Trailing text after the array, even when it contains brackets such as
+      "[1] memory extracted" or "stored in [memories] table" (fixes the
+      rfind(']') bug that caused persistent JSONDecodeError on 4 sessions)
+    - Markdown code fences (```json...```) — find('[') skips the fence prefix
+    - Leading prose containing bracket chars like "[transcript]" — the loop
+      advances past each failed parse attempt to find the real array
+
+    Each item is then schema-validated via _valid_memory_item — non-conforming
+    items are dropped (with a log entry) so prompt-injected or malformed
+    output cannot reach the database.
+    """
     text = response_text.strip()
-    start = text.find("[")
-    end = text.rfind("]")
-    if start == -1 or end == -1:
+    pos = 0
+    decoder = json.JSONDecoder()
+    raw = None
+    while True:
+        start = text.find("[", pos)
+        if start == -1:
+            return []
+        try:
+            value, _ = decoder.raw_decode(text, start)
+            if isinstance(value, list) and (not value or isinstance(value[0], dict)):
+                raw = value
+                break
+        except json.JSONDecodeError:
+            pass
+        pos = start + 1
+
+    if not raw:
         return []
-    return json.loads(text[start:end + 1])
+    valid = [item for item in raw if _valid_memory_item(item)]
+    dropped = len(raw) - len(valid)
+    if dropped:
+        log.warning("Dropped %d invalid memory item(s) from LLM output", dropped)
+    return valid
 
 
 def _increment_failures(conn, session_id, session_prefix):
@@ -259,7 +327,7 @@ def distill_session(embedder, client, model, session, dry_run=False):
             return 0
 
         # Batch embed all contents at once — much faster than one at a time
-        valid = [(m["content"].strip(), m.get("tags", [])) for m in memories if m.get("content", "").strip()]
+        valid = [(m["content"].strip(), m.get("tags", [])) for m in memories if isinstance(m, dict) and m.get("content", "").strip()]
         if not valid:
             return 0
 
