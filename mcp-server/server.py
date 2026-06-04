@@ -1,4 +1,4 @@
-import os, json, logging, threading, time
+import os, json, logging, threading, time, inspect, traceback
 from collections import OrderedDict
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -25,6 +25,14 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://claude:memory_pass@l
 GUARD_NOOP_THRESHOLD   = float(os.environ.get("GUARD_NOOP_THRESHOLD",   "0.85"))  # identical meaning → skip
 GUARD_UPDATE_THRESHOLD = float(os.environ.get("GUARD_UPDATE_THRESHOLD", "0.75"))  # very similar → suggest update instead
 
+# Mirrors distill_sessions.py MIN_MESSAGE_COUNT so get_stats reports the same
+# "pending" set the distiller will actually process. Sessions below this are
+# reported separately as below_min_messages, not as pending_distill.
+DISTILL_MIN_MESSAGES = int(os.environ.get("DISTILL_MIN_MESSAGES", "5"))
+# Mirrors distill_sessions.py DISTILL_FAILURE_CAP (hardcoded 3 there). Sessions
+# at/above this failure count are reported as capped, not pending.
+DISTILL_FAILURE_CAP = 3
+
 # ── Search cache ───────────────────────────────────────────────────────────────
 CACHE_MAX_SIZE    = 500   # max entries across all queries
 CACHE_TTL_SECONDS = 600   # 10 minutes
@@ -35,28 +43,87 @@ _cache_lock = threading.Lock()
 log.info("Loading embedding model...")
 embedder = SentenceTransformer("all-mpnet-base-v2")
 log.info("Connecting to database...")
-_pool = psycopg2.pool.ThreadedConnectionPool(1, 5, DATABASE_URL)
+
+# Register the pgvector type once per physical connection — at connection
+# creation rather than on every checkout — so MCP tool calls don't each pay a
+# SELECT round-trip to look up the vector type OID.
+#
+# Guarded with inspect.isclass because the test suite replaces psycopg2 with a
+# MagicMock, which cannot be subclassed; under that mocked import we fall back
+# to the (also-mocked) base pool class.
+if inspect.isclass(psycopg2.pool.ThreadedConnectionPool):
+    class _VectorPool(psycopg2.pool.ThreadedConnectionPool):
+        def _connect(self, key=None):
+            conn = super()._connect(key)
+            register_vector(conn)
+            return conn
+    _PoolClass = _VectorPool
+else:  # pragma: no cover — only hit under the mocked test import
+    _PoolClass = psycopg2.pool.ThreadedConnectionPool
+
+_pool = _PoolClass(1, 5, DATABASE_URL)
 log.info("Ready.")
+
+_DB_UNREACHABLE = (
+    "Database unreachable. Ensure the stack is running (`docker compose up -d`). "
+    "If the mcp-server container was just recreated, reconnect this Claude Code "
+    "session: /exit, then `claude --continue`."
+)
+_DB_BUSY = (
+    "All database connections are busy (pool exhausted). Retry in a moment; "
+    "if this persists, check for stuck long-running queries."
+)
 
 
 @contextmanager
 def db_conn():
-    conn = _pool.getconn()
+    """Check out a live pooled connection, recovering from stale ones.
+
+    pgvector registration happens at connection creation (see _VectorPool), so
+    there is no per-checkout SELECT. A connection found dead at checkout is
+    transparently replaced; one that dies mid-use raises a clear DB-unreachable
+    error instead of the misleading -32602 it used to surface.
+    """
+    conn = None
+    for _ in range(2):
+        try:
+            candidate = _pool.getconn()
+        except psycopg2.pool.PoolError as e:
+            raise RuntimeError(_DB_BUSY) from e
+        if candidate.closed:
+            _pool.putconn(candidate, close=True)
+            continue
+        try:
+            candidate.rollback()
+        except psycopg2.OperationalError:
+            _pool.putconn(candidate, close=True)
+            continue
+        conn = candidate
+        break
+    if conn is None:
+        raise RuntimeError(_DB_UNREACHABLE)
+
+    broken = False
     try:
-        # Rollback any leftover transaction from previous pool use,
-        # then register the vector type (runs a SELECT).
-        # autocommit=False is the psycopg2 default — don't set it explicitly
-        # while a transaction may already be open (causes set_session error).
-        conn.rollback()
-        register_vector(conn)
         yield conn
+    except psycopg2.OperationalError as e:
+        broken = True
+        log.error("db_conn lost its connection: %s", e)
+        raise RuntimeError(_DB_UNREACHABLE) from e
     finally:
-        conn.rollback()  # ensure clean state before returning to pool
-        _pool.putconn(conn)
+        if broken:
+            _pool.putconn(conn, close=True)
+        else:
+            try:
+                conn.rollback()
+            except psycopg2.OperationalError:
+                _pool.putconn(conn, close=True)
+            else:
+                _pool.putconn(conn)
 
 
 def embed(text):
-    return embedder.encode(text, normalize_embeddings=True)
+    return embedder.encode(text, normalize_embeddings=True, show_progress_bar=False)
 
 
 def _parse_dt(value: str, name: str):
@@ -267,11 +334,12 @@ def _api_related_memories(memory_id: int, limit: int = 3) -> list:
     with db_conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
+                "WITH q AS (SELECT %s::vector AS vec) "
                 "SELECT id, content, tags, project, created_at, "
-                "ROUND((1 - (embedding <=> %s))::numeric, 4) AS sim "
-                "FROM memories WHERE deleted_at IS NULL AND id != %s "
-                "ORDER BY embedding <=> %s LIMIT %s",
-                (vec, memory_id, vec, limit)
+                "ROUND((1 - (embedding <=> q.vec))::numeric, 4) AS sim "
+                "FROM memories, q WHERE deleted_at IS NULL AND id != %s "
+                "ORDER BY embedding <=> q.vec LIMIT %s",
+                (vec, memory_id, limit)
             )
             rows = [dict(r) for r in cur.fetchall()]
     for r in rows:
@@ -290,12 +358,13 @@ def _api_recall(query: str, threshold: float = 0.78, limit: int = 20) -> list:
     with db_conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
+                "WITH q AS (SELECT %s::vector AS vec) "
                 "SELECT id, content, tags, project, created_at, "
-                "ROUND((1 - (embedding <=> %s))::numeric, 4) AS sim "
-                "FROM memories WHERE deleted_at IS NULL "
-                "AND (1 - (embedding <=> %s)) >= %s "
-                "ORDER BY embedding <=> %s LIMIT %s",
-                (vec, vec, threshold, vec, limit)
+                "ROUND((1 - (embedding <=> q.vec))::numeric, 4) AS sim "
+                "FROM memories, q WHERE deleted_at IS NULL "
+                "AND (1 - (embedding <=> q.vec)) >= %s "
+                "ORDER BY embedding <=> q.vec LIMIT %s",
+                (vec, threshold, limit)
             )
             rows = [dict(r) for r in cur.fetchall()]
     results = []
@@ -412,10 +481,11 @@ def _write_guard(content: str, vector) -> dict:
         with db_conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
-                    "SELECT id, content, ROUND((1 - (embedding <=> %s))::numeric, 4) AS sim "
-                    "FROM memories WHERE deleted_at IS NULL AND embedding IS NOT NULL "
-                    "ORDER BY embedding <=> %s LIMIT 1",
-                    (vector, vector)
+                    "WITH q AS (SELECT %s::vector AS vec) "
+                    "SELECT id, content, ROUND((1 - (embedding <=> q.vec))::numeric, 4) AS sim "
+                    "FROM memories, q WHERE deleted_at IS NULL AND embedding IS NOT NULL "
+                    "ORDER BY embedding <=> q.vec LIMIT 1",
+                    (vector,)
                 )
                 row = cur.fetchone()
         if not row:
@@ -440,22 +510,38 @@ def _write_guard(content: str, vector) -> dict:
 # ── MCP tools ─────────────────────────────────────────────────────────────────
 
 @mcp.tool()
-def save_memory(content: str, tags: list[str] = [], source: str = "claude-code", project: str = "") -> str:
-    """Save a thought, request, note, or piece of information to persistent memory."""
+def save_memory(content: str, tags: list[str] = [], source: str = "claude-code", project: str = "", force: bool = False) -> str:
+    """Save a thought, request, note, or piece of information to persistent memory.
+
+    On a near-duplicate, returns a NOOP message listing all three paths:
+      - NOOP: skip (default; the existing memory already captures this)
+      - UPDATE: call update_memory(<id>, content=..., tags=...) to merge new detail
+      - ADD: call save_memory again with force=True to save as a separate memory
+    """
     vector = embed(content)
     try:
         with db_conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                # Semantic dedup check — only against active (non-deleted) memories
-                cur.execute(
-                    "SELECT id, content, ROUND((1 - (embedding <=> %s))::numeric, 4) AS sim "
-                    "FROM memories WHERE (1 - (embedding <=> %s)) >= %s AND deleted_at IS NULL "
-                    "ORDER BY embedding <=> %s LIMIT 1",
-                    (vector, GUARD_NOOP_THRESHOLD, vector)
-                )
-                dup = cur.fetchone()
-                if dup:
-                    return f"Duplicate of memory ID {dup['id']} (similarity {dup['sim']}): {dup['content'][:80]}..."
+                if not force:
+                    # CTE binds vector once: pgvector's psycopg2 adapter doesn't safely
+                    # reuse a single vector across multiple %s placeholders in one call.
+                    cur.execute(
+                        "WITH q AS (SELECT %s::vector AS vec) "
+                        "SELECT id, content, ROUND((1 - (embedding <=> q.vec))::numeric, 4) AS sim "
+                        "FROM memories, q WHERE (1 - (embedding <=> q.vec)) >= %s AND deleted_at IS NULL "
+                        "ORDER BY embedding <=> q.vec LIMIT 1",
+                        (vector, GUARD_NOOP_THRESHOLD)
+                    )
+                    dup = cur.fetchone()
+                    if dup:
+                        return (
+                            f"⚠️ NOOP — near-duplicate of memory ID {dup['id']} "
+                            f"(similarity {dup['sim']}): {dup['content'][:80]}...\n"
+                            f"Three options:\n"
+                            f"  • NOOP   — skip saving (the existing memory already captures this)\n"
+                            f"  • UPDATE — call update_memory({dup['id']}, content=..., tags=...) to merge new detail into the existing memory\n"
+                            f"  • ADD    — call save_memory again with force=True to save this as a separate memory anyway"
+                        )
                 # ON CONFLICT on content_hash handles exact-duplicate races atomically.
                 # If the conflicting row was soft-deleted, un-delete it (restore).
                 # If it's an active row the DO UPDATE WHERE is false → RETURNING returns nothing.
@@ -511,9 +597,10 @@ def semantic_search(query: str, limit: int = 10, min_similarity: float = 0.3,
     try:
         with db_conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                # Build WHERE dynamically; first two placeholders belong to the SELECT and WHERE cosine checks
-                conditions = ["embedding IS NOT NULL", "deleted_at IS NULL", "(1 - (embedding <=> %s)) >= %s"]
-                cond_params = [vector, min_similarity]
+                # CTE binds vector once: pgvector's psycopg2 adapter doesn't safely
+                # reuse a single vector across multiple %s placeholders in one call.
+                conditions = ["embedding IS NOT NULL", "deleted_at IS NULL", "(1 - (embedding <=> q.vec)) >= %s"]
+                cond_params = [min_similarity]
                 if project:
                     conditions.append("project = %s")
                     cond_params.append(project)
@@ -525,12 +612,13 @@ def semantic_search(query: str, limit: int = 10, min_similarity: float = 0.3,
                     cond_params.append(before_dt)
 
                 sql = (
+                    "WITH q AS (SELECT %s::vector AS vec) "
                     "SELECT id, content, tags, source, project, created_at, "
-                    "ROUND((1 - (embedding <=> %s))::numeric, 4) AS similarity "
-                    f"FROM memories WHERE {' AND '.join(conditions)} "
-                    "ORDER BY embedding <=> %s LIMIT %s"
+                    "ROUND((1 - (embedding <=> q.vec))::numeric, 4) AS similarity "
+                    f"FROM memories, q WHERE {' AND '.join(conditions)} "
+                    "ORDER BY embedding <=> q.vec LIMIT %s"
                 )
-                params = [vector] + cond_params + [vector, limit]
+                params = [vector] + cond_params + [limit]
                 cur.execute(sql, params)
                 rows = cur.fetchall()
         result = json.dumps([dict(r) for r in rows], indent=2, default=str) if rows else f"No similar memories found for: '{query}'"
@@ -625,19 +713,22 @@ def hybrid_search(query: str, limit: int = 10, keyword_weight: float = 0.7,
 
     extra_where = (" AND " + " AND ".join(extra_conditions)) if extra_conditions else ""
 
+    # CTE q binds vector once: pgvector's psycopg2 adapter doesn't safely
+    # reuse a single vector across multiple %s placeholders in one call.
     sql = f"""
-WITH candidates AS (
+WITH q AS (SELECT %s::vector AS vec),
+candidates AS (
   SELECT id, content, tags, source, project, created_at,
     COALESCE(ts_rank(to_tsvector('english', content), plainto_tsquery('english', %s)), 0) AS kw_score,
     CASE WHEN embedding IS NOT NULL
-         THEN GREATEST(1 - (embedding <=> %s), 0)
+         THEN GREATEST(1 - (embedding <=> q.vec), 0)
          ELSE 0 END AS sem_score
-  FROM memories
+  FROM memories, q
   WHERE deleted_at IS NULL
     AND (
       to_tsvector('english', content) @@ plainto_tsquery('english', %s)
       OR content ILIKE %s
-      OR (embedding IS NOT NULL AND (1 - (embedding <=> %s)) >= %s)
+      OR (embedding IS NOT NULL AND (1 - (embedding <=> q.vec)) >= %s)
     )
     {extra_where}
 )
@@ -649,9 +740,9 @@ FROM candidates
 ORDER BY hybrid_score DESC
 LIMIT %s
 """
-    # params order: kw_score ts_rank query, sem_score embed, WHERE ts @@ query, WHERE ILIKE,
-    #               WHERE sem >= threshold, [extra], kw_weight, sem_weight, limit
-    params = [query, vector, query, f"%{query}%", vector, min_semantic_similarity] + extra_params + [keyword_weight, semantic_weight, limit]
+    # params order: vector (WITH q), kw_score ts_rank query, WHERE ts @@ query,
+    #               WHERE ILIKE, WHERE sem >= threshold, [extra], kw_weight, sem_weight, limit
+    params = [vector, query, query, f"%{query}%", min_semantic_similarity] + extra_params + [keyword_weight, semantic_weight, limit]
 
     try:
         with db_conn() as conn:
@@ -870,13 +961,14 @@ def update_memory(memory_id: int, content: str = None, tags: list[str] = None, f
                     new_vector = embed(content)
                     # Check for near-duplicates, excluding the memory being updated and deleted memories
                     cur.execute(
-                        "SELECT id, content, ROUND((1 - (embedding <=> %s))::numeric, 4) AS sim "
-                        "FROM memories "
-                        "WHERE (1 - (embedding <=> %s)) >= %s "
+                        "WITH q AS (SELECT %s::vector AS vec) "
+                        "SELECT id, content, ROUND((1 - (embedding <=> q.vec))::numeric, 4) AS sim "
+                        "FROM memories, q "
+                        "WHERE (1 - (embedding <=> q.vec)) >= %s "
                         "AND id != %s "
                         "AND deleted_at IS NULL "
-                        "ORDER BY embedding <=> %s LIMIT 1",
-                        (new_vector, GUARD_NOOP_THRESHOLD, memory_id, new_vector)
+                        "ORDER BY embedding <=> q.vec LIMIT 1",
+                        (new_vector, GUARD_NOOP_THRESHOLD, memory_id)
                     )
                     dup = cur.fetchone()
                     if dup:
@@ -905,13 +997,21 @@ def update_memory(memory_id: int, content: str = None, tags: list[str] = None, f
                         (tags, memory_id)
                     )
                 updated = cur.rowcount
+                if not updated:
+                    cur.execute("SELECT deleted_at FROM memories WHERE id=%s", (memory_id,))
+                    exists = cur.fetchone()
             conn.commit()
         if updated:
             _cache_invalidate()
-        log.info("Memory updated id=%s", memory_id)
-        return f"✅ Memory {memory_id} updated." if updated else f"❌ No active memory with ID {memory_id}"
+            log.info("Memory updated id=%s", memory_id)
+            return f"✅ Memory {memory_id} updated."
+        elif exists is None:
+            return f"❌ Memory ID {memory_id} not found."
+        else:
+            return (f"❌ Memory {memory_id} is soft-deleted — use restore_memory({memory_id}) "
+                    f"to restore it first, then update.")
     except Exception as e:
-        log.error("update_memory id=%s failed: %s", memory_id, e)
+        log.error("update_memory id=%s failed: %s\n%s", memory_id, e, traceback.format_exc())
         return f"❌ Error: {e}"
 
 
@@ -1029,7 +1129,12 @@ def get_stats() -> str:
                         SELECT
                             COUNT(*)                                    AS total,
                             COUNT(*) FILTER (WHERE distilled = TRUE)    AS distilled,
-                            COUNT(*) FILTER (WHERE distill_failures >= 3) AS capped
+                            COUNT(*) FILTER (WHERE distill_failures >= %s) AS capped,
+                            COUNT(*) FILTER (
+                                WHERE distilled = FALSE
+                                  AND distill_failures < %s
+                                  AND message_count < %s
+                            )                                           AS below_min
                         FROM imported_sessions
                     )
                     SELECT
@@ -1039,10 +1144,11 @@ def get_stats() -> str:
                         (SELECT json_agg(row_to_json(by_src))  FROM by_src)  AS by_source,
                         (SELECT total    FROM sess)     AS sessions_total,
                         (SELECT distilled FROM sess)    AS sessions_distilled,
-                        (SELECT capped   FROM sess)     AS sessions_capped
-                """)
+                        (SELECT capped   FROM sess)     AS sessions_capped,
+                        (SELECT below_min FROM sess)    AS sessions_below_min
+                """, (DISTILL_FAILURE_CAP, DISTILL_FAILURE_CAP, DISTILL_MIN_MESSAGES))
                 row = cur.fetchone()
-        total, deleted, by_project_json, by_source_json, s_total, s_distilled, s_capped = row
+        total, deleted, by_project_json, by_source_json, s_total, s_distilled, s_capped, s_below_min = row
         with _cache_lock:
             cache_size = len(_search_cache)
         return json.dumps({
@@ -1054,7 +1160,8 @@ def get_stats() -> str:
                 "total": s_total,
                 "distilled": s_distilled,
                 "capped": s_capped,
-                "pending_distill": s_total - s_distilled - s_capped,
+                "below_min_messages": s_below_min,
+                "pending_distill": s_total - s_distilled - s_capped - s_below_min,
             },
             "search_cache": {
                 "entries": cache_size,
@@ -1114,7 +1221,11 @@ def export_memories(project: str = None, tag: str = None, since: str = None,
         if output_format == "json":
             return json.dumps({"exported_at": now.isoformat(), "count": len(records), "memories": records}, indent=2, default=str)
 
-        # Markdown format
+        # Markdown format. Memory section separator is `----` (4+ dashes) so that
+        # any `---` line inside memory content does not break out of its section.
+        # Inside content, any line that is purely `---`, `***`, or `___` would be
+        # parsed by Markdown as a horizontal rule, so we escape such lines by
+        # prefixing with a backslash (`\---`) which renders as the literal text.
         lines = [f"# Memory Export", f"*Exported: {now.strftime('%Y-%m-%d %H:%M UTC')} — {len(records)} memories*", ""]
         for r in records:
             lines.append(f"## [{r['id']}] {r['created_at']}")
@@ -1122,9 +1233,14 @@ def export_memories(project: str = None, tag: str = None, since: str = None,
                 lines.append(f"**Project:** {r['project']}  **Source:** {r['source']}")
             lines.append(f"**Tags:** {', '.join(r['tags']) if r['tags'] else '(none)'}")
             lines.append("")
-            lines.append(r["content"])
+            content = r["content"] or ""
+            escaped = "\n".join(
+                ("\\" + ln) if ln.strip() in ("---", "***", "___") else ln
+                for ln in content.split("\n")
+            )
+            lines.append(escaped)
             lines.append("")
-            lines.append("---")
+            lines.append("----")
             lines.append("")
         return "\n".join(lines)
 
@@ -1363,8 +1479,9 @@ async def api_memories_delete(request: Request) -> JSONResponse:
         q = request.query_params
         project = q.get("project")
         tag = q.get("tag")
-        # Treat any value other than "false" as dry_run=True; absent param defaults to False
-        dry_run = q.get("dry_run", "false").lower() != "false"
+        # Safe-by-default: omitting dry_run param is a preview (dry_run=True).
+        # Pass dry_run=false explicitly to perform the actual deletion.
+        dry_run = q.get("dry_run", "true").lower() != "false"
         result = _api_bulk_delete(project=project, tag=tag, dry_run=dry_run)
         if "error" in result:
             return JSONResponse(result, status_code=400)

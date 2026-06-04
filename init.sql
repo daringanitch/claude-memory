@@ -1,17 +1,20 @@
 CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 CREATE TABLE memories (
-  id          SERIAL PRIMARY KEY,
-  content     TEXT         NOT NULL,
-  tags        TEXT[]       DEFAULT '{}',
-  source      VARCHAR(100) DEFAULT 'claude-code',
-  project     VARCHAR(100) DEFAULT '',
-  embedding   vector(768),
-  created_at  TIMESTAMP    DEFAULT NOW(),
-  updated_at  TIMESTAMP    DEFAULT NOW(),
-  deleted_at  TIMESTAMP    DEFAULT NULL
+  id           SERIAL PRIMARY KEY,
+  content      TEXT         NOT NULL,
+  content_hash TEXT         GENERATED ALWAYS AS (encode(digest(content, 'sha256'), 'hex')) STORED,
+  tags         TEXT[]       DEFAULT '{}',
+  source       VARCHAR(100) DEFAULT 'claude-code',
+  project      VARCHAR(100) DEFAULT '',
+  embedding    vector(768),
+  created_at   TIMESTAMP    DEFAULT NOW(),
+  updated_at   TIMESTAMP    DEFAULT NOW(),
+  deleted_at   TIMESTAMP    DEFAULT NULL
 );
 
+CREATE UNIQUE INDEX idx_memories_content_hash ON memories(content_hash);
 CREATE INDEX idx_memories_tags      ON memories USING GIN(tags);
 CREATE INDEX idx_memories_created   ON memories(created_at DESC);
 CREATE INDEX idx_memories_project   ON memories(project);

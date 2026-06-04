@@ -3,9 +3,16 @@
 Generate ~/.claude/user.md from distilled memories in PostgreSQL.
 
 Usage:
-  python generate_user_profile.py             # write to ~/.claude/user.md
-  python generate_user_profile.py --dry-run   # print to stdout
+  python generate_user_profile.py                        # write to ~/.claude/user.md (CLAUDE.md not touched)
+  python generate_user_profile.py --patch-claude-md      # also prepend User Profile section to CLAUDE.md
+  python generate_user_profile.py --dry-run              # print to stdout, no files written
   python generate_user_profile.py --output /custom/path.md
+
+Security note (H4):
+  CLAUDE.md is injected into every Claude Code session at startup. Automatically
+  patching it creates a persistent prompt-injection path if memories have been
+  poisoned (e.g. via distilled transcript content). --patch-claude-md must be
+  passed explicitly so this write never happens by accident or via a cron job.
 """
 import argparse
 import logging
@@ -251,6 +258,15 @@ def main():
     parser = argparse.ArgumentParser(description="Generate ~/.claude/user.md from distilled memories")
     parser.add_argument("--dry-run", action="store_true", help="Print to stdout instead of writing file")
     parser.add_argument("--output", default=str(OUTPUT_PATH), help=f"Output path (default: {OUTPUT_PATH})")
+    parser.add_argument(
+        "--patch-claude-md",
+        action="store_true",
+        help=(
+            "Prepend a '## User Profile' reference section to ~/.claude/CLAUDE.md. "
+            "Off by default — CLAUDE.md is only modified when this flag is explicitly passed. "
+            "Review user.md output (--dry-run) before using this flag."
+        ),
+    )
     args = parser.parse_args()
 
     log.info("generate_user_profile starting (dry_run=%s)", args.dry_run)
@@ -284,8 +300,12 @@ def main():
     output_path.write_text(content, encoding="utf-8")
     log.info("Written %d bytes to %s", len(content), output_path)
 
-    patch_claude_md()
-    log.info("Done")
+    # H4: CLAUDE.md write requires explicit opt-in — never runs by default
+    if args.patch_claude_md:
+        patch_claude_md()
+        log.info("Done (CLAUDE.md patched)")
+    else:
+        log.info("Done (CLAUDE.md not modified — pass --patch-claude-md to update it)")
 
 
 if __name__ == "__main__":
