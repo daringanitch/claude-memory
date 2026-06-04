@@ -110,7 +110,7 @@ class TestSaveMemory:
             mock_db.return_value.__enter__ = MagicMock(return_value=conn)
             mock_db.return_value.__exit__ = MagicMock(return_value=False)
             result = server.save_memory("existing memory content here")
-        assert "Duplicate" in result
+        assert "near-duplicate" in result
         assert "5" in result
 
     def test_successful_save(self):
