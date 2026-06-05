@@ -21,10 +21,14 @@ from openai import OpenAI
 from pgvector.psycopg2 import register_vector
 from sentence_transformers import SentenceTransformer
 
+_raw = os.environ.get("LOGLEVEL", "INFO").upper()
+_level = getattr(logging, _raw, None)
+if not isinstance(_level, int):
+    _level = logging.INFO
 logging.basicConfig(
     # Honor LOGLEVEL env var (set by Invoke-ImportPipeline.ps1's -Verbosity flag);
-    # fall back to INFO so direct python invocations keep the original behavior.
-    level=os.environ.get("LOGLEVEL", "INFO").upper(),
+    # fall back to INFO for unset or unrecognised values.
+    level=_level,
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%Y-%m-%dT%H:%M:%S",
 )
