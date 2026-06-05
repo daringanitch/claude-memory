@@ -183,7 +183,7 @@ Open `http://localhost:3333/ui` after `docker compose up -d`. No build step requ
 | `/api/memories/:id/related` | GET | Nearest-neighbor memories. Param: `limit` (default 3) |
 | `/api/recall` | POST | Semantic search. Body: `{"query": "...", "threshold": 0.78}` |
 | `/api/preferences` | GET | Behavioral preferences grouped by tier: explicit → signals → inferred |
-| `/api/memories` | DELETE | Bulk soft-delete. Params: `project`, `tag` |
+| `/api/memories` | DELETE | Bulk soft-delete. Params: `project`, `tag`, `dry_run`. **`dry_run` defaults to `true` (preview)** — pass `dry_run=false` to actually delete. |
 
 ## Configuration
 

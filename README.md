@@ -275,7 +275,7 @@ bash restore.sh backups/claude-memory-2026-03-08T12-00-00.pgdump
 | `/api/memories/:id/related` | GET | Nearest-neighbour memories. Param: `limit` (default 3) |
 | `/api/recall` | POST | Semantic search. Body: `{"query": "...", "threshold": 0.78}` |
 | `/api/preferences` | GET | Behavioral preferences grouped by tier: explicit → signals → inferred |
-| `/api/memories` | DELETE | Bulk soft-delete. Params: `project`, `tag` |
+| `/api/memories` | DELETE | Bulk soft-delete. Params: `project`, `tag`, `dry_run`. **`dry_run` defaults to `true` (preview only)** — pass `dry_run=false` explicitly to perform deletion. |
 
 ## Migrations
 
@@ -293,6 +293,7 @@ docker exec -i claude-memory-db psql -U claude -d memory \
 | `002_content_hash_dedup.sql` | `content_hash` unique index for insert dedup |
 | `003_distill_failure_cap.sql` | `distill_failures` column on `imported_sessions` |
 | `004_signals_extracted.sql` | `signals_extracted` column on `imported_sessions` |
+| `005_content_hash_sha256.sql` | Upgrade `content_hash` from md5 to SHA-256 (pgcrypto) |
 
 ## Tests
 
@@ -326,7 +327,7 @@ with descriptive tags like ["project:name", "type:decision|bug|preference|patter
 CREATE TABLE memories (
   id           SERIAL PRIMARY KEY,
   content      TEXT         NOT NULL,
-  content_hash VARCHAR(64)  GENERATED ALWAYS AS (md5(content)) STORED UNIQUE,
+  content_hash TEXT         GENERATED ALWAYS AS (encode(digest(content, 'sha256'), 'hex')) STORED,
   tags         TEXT[]       DEFAULT '{}',
   source       VARCHAR(100) DEFAULT 'claude-code',
   project      VARCHAR(100) DEFAULT '',
