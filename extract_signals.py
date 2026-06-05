@@ -328,6 +328,7 @@ def process_session(conn, session_id, project, embedder, dry_run=False):
 
     memories = corrections_to_memories(corrections, project)
     saved = 0
+    failed = 0
 
     for content in memories:
         log.info("  [%s] Preference: %s", session_id[:8], content[:120])
@@ -341,9 +342,14 @@ def process_session(conn, session_id, project, embedder, dry_run=False):
             except psycopg2.Error as e:
                 conn.rollback()
                 log.error("  [%s] DB error: %s", session_id[:8], e)
+                failed += 1
 
     if not dry_run:
-        mark_extracted(conn, session_id)
+        if failed:
+            log.warning("  [%s] %d/%d inserts failed — not marking extracted (will retry next run)",
+                        session_id[:8], failed, len(memories))
+        else:
+            mark_extracted(conn, session_id)
 
     return saved
 
