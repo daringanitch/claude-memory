@@ -35,12 +35,33 @@ import psycopg2.extras
 from pgvector.psycopg2 import register_vector
 from sentence_transformers import SentenceTransformer
 
+_raw = os.environ.get("LOGLEVEL", "INFO").upper()
+_level = getattr(logging, _raw, None)
+if not isinstance(_level, int):
+    _level = logging.INFO
 logging.basicConfig(
-    level=logging.INFO,
+    # Honor LOGLEVEL env var (set by Invoke-ImportPipeline.ps1's -Verbosity flag);
+    # fall back to INFO for unset or unrecognised values.
+    level=_level,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     datefmt="%Y-%m-%dT%H:%M:%S",
 )
 log = logging.getLogger("import")
+
+# Silence third-party INFO chatter that drowns out real progress (sentence-
+# transformers emits a model-load chunk on import; httpx/urllib3 noise from
+# any HTTP libs in transit). Keep WARNING+ so genuine problems still surface.
+for noisy in ("httpx", "httpcore", "openai", "urllib3", "sentence_transformers"):
+    logging.getLogger(noisy).setLevel(logging.WARNING)
+
+
+def progress(msg):
+    """User-facing progress line — bypasses LOGLEVEL filtering so it stays
+    visible at any -Verbosity. Use this for per-session heartbeats, project
+    headers, and run summaries. Reserve log.info() for diagnostic events
+    that the user may want suppressed at low verbosity."""
+    import time
+    print(f"{time.strftime('%Y-%m-%dT%H:%M:%S')}  {msg}", flush=True)
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://claude:memory_pass@localhost:5432/memory")
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
@@ -58,7 +79,7 @@ def get_db():
 
 
 def embed(text):
-    return embedder.encode(text, normalize_embeddings=True)
+    return embedder.encode(text, normalize_embeddings=True, show_progress_bar=False)
 
 
 def insert_memory(cur, content, tags, source, project="", created_at=None):
@@ -131,13 +152,18 @@ def import_claude_code(project_filter=None, min_length=50):
         home_encoded = str(Path.home()).replace("/", "-")  # e.g. "-Users-yourname"
         project_name = project_dir.name.replace(home_encoded, "").lstrip("-").replace("-", "/")
         project_short = project_name.split("/")[-1]
-        log.info("Project: %s (%d session(s))", project_name, len(jsonl_files))
+        progress(f"Project: {project_name} ({len(jsonl_files)} session(s))")
+
+        skipped = 0
+        imported = 0
 
         for jsonl_path in jsonl_files:
             session_id = jsonl_path.stem
 
             if is_session_already_processed(conn, session_id):
-                log.info("  Skipping %s (already distilled)", session_id[:8])
+                # Quiet per-session at DEBUG; aggregate count summarized after the loop.
+                log.debug("  Skipping %s (already distilled)", session_id[:8])
+                skipped += 1
                 continue
 
             messages = []
@@ -178,6 +204,9 @@ def import_claude_code(project_filter=None, min_length=50):
             if not messages:
                 continue
 
+            # Heartbeat before encoding — large sessions (>50 msgs) can take 5–30s
+            # to embed; without this, the user sees no activity between sessions.
+            progress(f"  Processing session {session_id[:8]} ({len(messages)} messages, embedding...)")
             try:
                 with conn.cursor() as cur:
                     for role, text, created_at in messages:
@@ -187,7 +216,8 @@ def import_claude_code(project_filter=None, min_length=50):
                         total += 1
                 conn.commit()
                 record_session(conn, session_id, project_short, len(messages))
-                log.info("  Imported session %s (%d messages)", session_id[:8], len(messages))
+                progress(f"  Imported session {session_id[:8]} ({len(messages)} messages)")
+                imported += 1
             except psycopg2.Error as e:
                 conn.rollback()
                 log.error("  DB error in %s: %s", jsonl_path.name, e)
@@ -195,8 +225,12 @@ def import_claude_code(project_filter=None, min_length=50):
                 conn.rollback()
                 log.error("  Unexpected error in %s: %s", jsonl_path.name, e)
 
+        # Per-project summary: aggregate the per-session Skipping noise into one line
+        if skipped or imported:
+            progress(f"Project {project_name}: imported {imported}, skipped {skipped} (already distilled)")
+
     conn.close()
-    log.info("Imported %d messages from Claude Code sessions.", total)
+    progress(f"Imported {total} messages from Claude Code sessions.")
 
 
 # ── Claude.ai export ──────────────────────────────────────────────────────────
@@ -263,7 +297,7 @@ def import_claude_ai(export_path, min_length=50):
             log.error("Unexpected error in conversation '%s': %s", convo_name, e)
 
     conn.close()
-    log.info("Imported %d messages from Claude.ai export.", total)
+    progress(f"Imported {total} messages from Claude.ai export.")
 
 
 # ── Plain text / markdown ─────────────────────────────────────────────────────
@@ -298,7 +332,7 @@ def import_text_files(paths, chunk_size=1500, overlap=200):
                     insert_memory(cur, chunk, tags, f"file:{path.name}", "", None)
                     total += 1
             conn.commit()
-            log.info("%s: %d chunk(s) imported", path.name, len(chunks))
+            progress(f"{path.name}: {len(chunks)} chunk(s) imported")
         except psycopg2.Error as e:
             conn.rollback()
             log.error("DB error in %s: %s", file_path, e)
@@ -307,7 +341,7 @@ def import_text_files(paths, chunk_size=1500, overlap=200):
             log.error("Unexpected error in %s: %s", file_path, e)
 
     conn.close()
-    log.info("Imported %d chunks from text files.", total)
+    progress(f"Imported {total} chunks from text files.")
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -326,18 +360,18 @@ def main():
         sys.exit(1)
 
     if args.claude_code:
-        log.info("=== Importing Claude Code sessions ===")
+        progress("=== Importing Claude Code sessions ===")
         import_claude_code(project_filter=args.project, min_length=args.min_length)
 
     if args.claude_ai:
-        log.info("=== Importing Claude.ai export ===")
+        progress("=== Importing Claude.ai export ===")
         import_claude_ai(args.claude_ai, min_length=args.min_length)
 
     if args.text:
-        log.info("=== Importing text files ===")
+        progress("=== Importing text files ===")
         import_text_files(args.text)
 
-    log.info("Done.")
+    progress("Done.")
 
 
 if __name__ == "__main__":
