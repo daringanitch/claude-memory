@@ -16,6 +16,36 @@ services:
       timeout: 5s
       retries: 5
 
+  ollama:
+    image: ollama/ollama:latest   # TODO: pin to a verified tag once Option A is confirmed (project pinning policy)
+    container_name: claude-memory-ollama
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:11434:11434"   # host access for Test-StackHealth.ps1
+    environment:
+      # Default served context for ALL models, including the OpenAI-compat /v1
+      # path (which ignores per-request num_ctx). The bundled-runtime default of
+      # 4096 silently truncated large behavioral-pass prompts; 16384 holds a
+      # ~20k-char transcript + prompt + output. Option A: qwen2.5:7b @ 16k on an
+      # 8GB GPU — may partially spill to CPU/RAM; acceptable for a background job.
+      OLLAMA_CONTEXT_LENGTH: "16384"
+      OLLAMA_KEEP_ALIVE: "10m"
+    volumes:
+      - ollama_models:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
   mcp-server:
     build: ./mcp-server
     container_name: claude-memory-mcp
@@ -24,6 +54,10 @@ services:
       - "127.0.0.1:3333:3333"
     environment:
       DATABASE_URL: postgresql://claude:memory_pass@db:5432/memory
+      # Default endpoint for pipeline scripts run via `docker compose run mcp-server`.
+      # Reaches the in-stack ollama service over the compose network. The pipeline
+      # also passes -e OLLAMA_URL explicitly; this is the fallback for bare runs.
+      OLLAMA_URL: http://ollama:11434/v1
       TRANSFORMERS_OFFLINE: "1"
       HF_DATASETS_OFFLINE: "1"
     volumes:
@@ -37,6 +71,9 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      ollama:
+        condition: service_healthy
 
 volumes:
   model_cache:
+  ollama_models:
