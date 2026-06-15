@@ -21,7 +21,7 @@ services:
     container_name: claude-memory-ollama
     restart: unless-stopped
     ports:
-      - "127.0.0.1:11737:11434"   # host access for Test-StackHealth.ps1 (11737 avoids collision with host Ollama default 11434)
+      - "127.0.0.1:11737:11434"   # 11737 avoids collision with a host-side Ollama installation (default 11434)
     environment:
       # Default served context for ALL models, including the OpenAI-compat /v1
       # path (which ignores per-request num_ctx). The bundled-runtime default of
@@ -43,7 +43,7 @@ services:
     # Linux, Windows without passthrough). On those hosts the base file runs
     # ollama on CPU (slower but functional). To use the GPU:
     #   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
-    # The Windows scripts add the override automatically when a GPU is detected.
+    # Some scripts (e.g. on Windows) can detect the NVIDIA runtime and apply the override automatically.
 
   mcp-server:
     build: ./mcp-server

@@ -9,8 +9,6 @@
 # Usage:
 #   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
 #
-# The Windows scripts (Start-Stack.ps1, Invoke-ImportPipeline.ps1) include this
-# automatically when they detect the nvidia docker runtime.
 
 services:
   ollama:
