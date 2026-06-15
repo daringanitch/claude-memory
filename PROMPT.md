@@ -138,7 +138,7 @@ Standalone CLI. Structured logging (`logging.getLogger("import")`). Deduplicates
 
 ## Distillation script (`distill_sessions.py`)
 
-Uses a **local Ollama LLM** (no API key required). Default model: `qwen2.5:7b`. Connect via OpenAI-compatible API at `OLLAMA_URL` — the in-stack `ollama` compose service at `http://ollama:11434/v1` (host-side default `http://localhost:11434/v1`).
+Uses a **local Ollama LLM** (no API key required). Default model: `qwen2.5:7b`. Connect via OpenAI-compatible API at `OLLAMA_URL` — the in-stack `ollama` compose service at `http://ollama:11434/v1` (host-side default `http://localhost:11737/v1`).
 
 - Reads `imported_sessions` where `distilled=FALSE` and `distill_failures < 3`
 - Sends transcript to Ollama; extracts durable memories (decisions, patterns, bug fixes) as JSON array

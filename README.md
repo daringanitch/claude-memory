@@ -361,7 +361,7 @@ Indexes: IVFFlat for vector cosine search, GIN for tag arrays and full-text sear
 | `POSTGRES_USER` | `claude` |
 | `POSTGRES_PASSWORD` | `memory_pass` |
 | `DATABASE_URL` | `postgresql://claude:memory_pass@db:5432/memory` |
-| `OLLAMA_URL` | `http://ollama:11434/v1` (in-stack service; mcp-server defaults to this). Host-side default is `http://localhost:11434/v1`. |
+| `OLLAMA_URL` | `http://ollama:11434/v1` (in-stack service; mcp-server defaults to this). Host-side default is `http://localhost:11737/v1`. |
 | `DISTILL_MODEL` | `qwen2.5:7b` |
 | `DISTILL_WORKERS` | `4` |
 | `TRANSFORMERS_OFFLINE` | `1` (set in Docker) |

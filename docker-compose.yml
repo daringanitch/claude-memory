@@ -21,7 +21,7 @@ services:
     container_name: claude-memory-ollama
     restart: unless-stopped
     ports:
-      - "127.0.0.1:11434:11434"   # host access for Test-StackHealth.ps1
+      - "127.0.0.1:11737:11434"   # host access for Test-StackHealth.ps1 (11737 avoids collision with host Ollama default 11434)
     environment:
       # Default served context for ALL models, including the OpenAI-compat /v1
       # path (which ignores per-request num_ctx). The bundled-runtime default of
