@@ -64,8 +64,11 @@ Then open a new `claude` session and try `list_memories`.
 ## Manual setup
 
 ```bash
-# Start services
+# Start services (includes an in-stack ollama on CPU; see note below)
 docker compose up -d
+
+# GPU acceleration (NVIDIA + Docker passthrough):
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
 
 # Register with Claude Code (user scope — works in any directory)
 claude mcp add --scope user --transport sse claude-memory http://localhost:3333/sse

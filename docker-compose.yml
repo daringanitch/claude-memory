@@ -38,13 +38,12 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
+    # GPU is opt-in via docker-compose.gpu.yml (kept out of the base file so
+    # `docker compose up` stays portable on non-NVIDIA hosts — Mac, GPU-less
+    # Linux, Windows without passthrough). On those hosts the base file runs
+    # ollama on CPU (slower but functional). To use the GPU:
+    #   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+    # The Windows scripts add the override automatically when a GPU is detected.
 
   mcp-server:
     build: ./mcp-server
