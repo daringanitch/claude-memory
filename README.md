@@ -38,15 +38,14 @@ Open `http://localhost:3333/ui` for a visual browser: Timeline River SVG of your
 
 ## Quick start
 
-**Prerequisites:** Docker, [Claude Code](https://claude.ai/code), [Ollama](https://ollama.com)
+**Prerequisites:** Docker, [Claude Code](https://claude.ai/code)
+
+> **Ollama is included** — the stack ships with an in-stack Ollama service
+> (`docker-compose.yml`). No separate host install needed.
+> Pull the model once after first start: `docker exec claude-memory-ollama ollama pull qwen2.5:7b`
 
 ```bash
-# 1. Install Ollama and pull a model
-brew install ollama
-ollama serve &
-ollama pull qwen2.5:7b   # recommended — or llama3.2:3b for lower RAM
-
-# 2. Clone and start
+# Clone and start
 git clone https://github.com/daringanitch/claude-memory
 cd claude-memory
 bash quickstart.sh
@@ -111,18 +110,17 @@ curl -X POST http://localhost:3333/cache/invalidate
 
 Raw imported messages are verbose. `distill_sessions.py` uses a local Ollama LLM to extract durable knowledge — decisions, patterns, bug root causes — and replaces raw messages with concise, searchable memories. No API key required.
 
-**Ollama setup (one-time):**
+Ollama is included in the stack — no separate install. Pull a model once after first start:
+
 ```bash
-brew install ollama
-ollama serve &
-ollama pull qwen2.5:7b   # ~4.7GB, best quality
-# or: ollama pull llama3.2:3b  (~2GB, faster)
+docker exec claude-memory-ollama ollama pull qwen2.5:7b   # ~4.7GB, best quality
+# or: docker exec claude-memory-ollama ollama pull llama3.2:3b  (~2GB, faster)
 ```
 
 ```bash
 # Distill all pending sessions (4 parallel workers by default)
+# OLLAMA_URL defaults to the in-stack service (http://ollama:11434/v1)
 docker compose run --rm -T \
-  -e OLLAMA_URL="http://host.docker.internal:11434/v1" \
   -v $(pwd)/distill_sessions.py:/app/distill_sessions.py:ro \
   mcp-server python /app/distill_sessions.py
 
@@ -197,7 +195,7 @@ python behavioral_pass.py --dry-run
 python behavioral_pass.py --force
 ```
 
-Requires Ollama running on the host. Uses `DISTILL_MODEL` env var (default: `qwen2.5:7b`).
+Uses the in-stack `ollama` service by default (`OLLAMA_URL=http://ollama:11434/v1`). Override via `OLLAMA_URL` to target a different endpoint. Uses `DISTILL_MODEL` env var (default: `qwen2.5:7b`).
 
 **Quality filters applied automatically:**
 - Sessions with fewer than 10 messages are skipped — behavioral patterns can't be observed in short exchanges
