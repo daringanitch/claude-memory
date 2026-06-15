@@ -12,7 +12,7 @@ Two services, orchestrated by Docker Compose:
 
 - **PostgreSQL 16 + pgvector** (port 5432): Stores memories with 768-dimensional embeddings. Schema initialized by `init.sql`.
 - **FastMCP server** (port 3333): `mcp-server/server.py` exposes 18 MCP tools over SSE plus a web UI and 10 REST endpoints. Uses `all-mpnet-base-v2` from sentence-transformers to generate embeddings. A `ThreadedConnectionPool` keeps 1–5 persistent DB connections.
-- **Ollama** (port 11434, runs on host): Local LLM used by `distill_sessions.py` for session distillation. No API key required. Recommended model: `qwen2.5:7b`.
+- **Ollama** (in-stack service; host port 11434): Local LLM used by `distill_sessions.py` and `behavioral_pass.py` for session distillation. No API key required. Recommended model: `qwen2.5:7b`.
 
 The `memories` table has GIN indexes on tags and full-text search, an IVFFlat index for cosine similarity vector search, and an auto-updating `updated_at` trigger. Soft-deletes are tracked via a `deleted_at` column; use `purge_memory` to permanently remove.
 
@@ -113,7 +113,7 @@ Results are stored as memories tagged `type:behavior` and appear in the **Inferr
 
 **What it extracts:** workflow habits, tooling instincts, communication style, decision-making speed, quality habits (tests, docs, diffs), correction patterns.
 
-Requires Ollama running on the host (`http://localhost:11434`). Uses `DISTILL_MODEL` env var (default: `qwen2.5:7b`).
+Uses the in-stack `ollama` compose service by default (`http://ollama:11434/v1`). Override via `OLLAMA_URL`. Uses `DISTILL_MODEL` env var (default: `qwen2.5:7b`).
 
 **Quality filters applied automatically:**
 - `distill_sessions.py` skips sessions with fewer than 5 messages (`MIN_MESSAGE_COUNT`) and deduplicates new memories against existing ones at ≥0.85 cosine similarity (`DISTILL_DEDUP_THRESHOLD`)
@@ -193,7 +193,7 @@ Open `http://localhost:3333/ui` after `docker compose up -d`. No build step requ
 | `POSTGRES_DB` | `memory` | Database name |
 | `POSTGRES_USER` | `claude` | DB user |
 | `POSTGRES_PASSWORD` | `memory_pass` | DB password |
-| `OLLAMA_URL` | `http://localhost:11434/v1` | Ollama endpoint for distillation (use `host.docker.internal` inside Docker) |
+| `OLLAMA_URL` | `http://ollama:11434/v1` | Ollama endpoint for distillation — the in-stack `ollama` compose service (host-side default: `http://localhost:11434/v1`) |
 | `DISTILL_MODEL` | `qwen2.5:7b` | Ollama model used by `distill_sessions.py` |
 | `DISTILL_WORKERS` | `4` | Parallel sessions during distillation |
 | `TRANSFORMERS_OFFLINE` | `1` (in Docker) | Prevents HuggingFace network calls on restart |

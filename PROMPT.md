@@ -138,7 +138,7 @@ Standalone CLI. Structured logging (`logging.getLogger("import")`). Deduplicates
 
 ## Distillation script (`distill_sessions.py`)
 
-Uses a **local Ollama LLM** (no API key required). Default model: `qwen2.5:7b`. Connect via OpenAI-compatible API at `OLLAMA_URL` (default `http://localhost:11434/v1`, use `http://host.docker.internal:11434/v1` inside Docker).
+Uses a **local Ollama LLM** (no API key required). Default model: `qwen2.5:7b`. Connect via OpenAI-compatible API at `OLLAMA_URL` — the in-stack `ollama` compose service at `http://ollama:11434/v1` (host-side default `http://localhost:11434/v1`).
 
 - Reads `imported_sessions` where `distilled=FALSE` and `distill_failures < 3`
 - Sends transcript to Ollama; extracts durable memories (decisions, patterns, bug fixes) as JSON array
@@ -181,7 +181,7 @@ Shell script at repo root. Uses `DOCKER=$(which docker || echo /usr/local/bin/do
 
 1. `docker compose up -d` (ensure services running), sleep 8
 2. Run `import_memories.py --claude-code` inside the mcp-server container
-3. Run `distill_sessions.py` inside the mcp-server container (pass `OLLAMA_URL=http://host.docker.internal:11434/v1`)
+3. Run `distill_sessions.py` inside the mcp-server container (uses `OLLAMA_URL=http://ollama:11434/v1`, the in-stack service)
 4. Run `extract_signals.py` inside the mcp-server container
 5. Log all output to `/tmp/claude-memory-import.log`
 
