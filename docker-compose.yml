@@ -16,6 +16,35 @@ services:
       timeout: 5s
       retries: 5
 
+  ollama:
+    image: ollama/ollama:0.24.0   # pinned (project policy); verified working with qwen2.5:7b @ num_ctx 16384 on 2026-06-01
+    container_name: claude-memory-ollama
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:11737:11434"   # 11737 avoids collision with a host-side Ollama installation (default 11434)
+    environment:
+      # Default served context for ALL models, including the OpenAI-compat /v1
+      # path (which ignores per-request num_ctx). The bundled-runtime default of
+      # 4096 silently truncated large behavioral-pass prompts; 16384 holds a
+      # ~20k-char transcript + prompt + output. Option A: qwen2.5:7b @ 16k on an
+      # 8GB GPU — may partially spill to CPU/RAM; acceptable for a background job.
+      OLLAMA_CONTEXT_LENGTH: "16384"
+      OLLAMA_KEEP_ALIVE: "10m"
+    volumes:
+      - ollama_models:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    # GPU is opt-in via docker-compose.gpu.yml (kept out of the base file so
+    # `docker compose up` stays portable on non-NVIDIA hosts — Mac, GPU-less
+    # Linux, Windows without passthrough). On those hosts the base file runs
+    # ollama on CPU (slower but functional). To use the GPU:
+    #   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+    # Some scripts (e.g. on Windows) can detect the NVIDIA runtime and apply the override automatically.
+
   mcp-server:
     build: ./mcp-server
     container_name: claude-memory-mcp
@@ -24,6 +53,10 @@ services:
       - "127.0.0.1:3333:3333"
     environment:
       DATABASE_URL: postgresql://claude:memory_pass@db:5432/memory
+      # Default endpoint for pipeline scripts run via `docker compose run mcp-server`.
+      # Reaches the in-stack ollama service over the compose network. The pipeline
+      # also passes -e OLLAMA_URL explicitly; this is the fallback for bare runs.
+      OLLAMA_URL: http://ollama:11434/v1
       TRANSFORMERS_OFFLINE: "1"
       HF_DATASETS_OFFLINE: "1"
     volumes:
@@ -34,9 +67,15 @@ services:
       timeout: 5s
       retries: 3
       start_period: 60s
+    # NOTE: mcp-server depends only on the DB. It does NOT depend on ollama —
+    # the server itself makes no LLM calls (distillation runs in ephemeral
+    # `docker compose run` containers; search/recall need only Postgres).
+    # Keeping ollama out of depends_on decouples lifecycles so ollama/GPU
+    # changes don't cascade-recreate mcp-server and sever the MCP SSE session.
     depends_on:
       db:
         condition: service_healthy
 
 volumes:
   model_cache:
+  ollama_models:

@@ -51,7 +51,7 @@ def progress(msg):
     print(f"{time.strftime('%Y-%m-%dT%H:%M:%S')}  {msg}", flush=True)
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://claude:memory_pass@localhost:5432/memory")
-OLLAMA_URL   = os.environ.get("OLLAMA_URL", "http://localhost:11434/v1")
+OLLAMA_URL   = os.environ.get("OLLAMA_URL", "http://localhost:11737/v1")
 MODEL        = os.environ.get("DISTILL_MODEL", "qwen2.5:7b")
 MAX_CHARS    = 20_000
 MIN_MESSAGE_COUNT = 10  # sessions with fewer messages can't show behavioral patterns

@@ -54,7 +54,7 @@ def progress(msg):
     print(f"{time.strftime('%Y-%m-%dT%H:%M:%S')}  {msg}", flush=True)
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://claude:memory_pass@localhost:5432/memory")
-OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/v1")
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11737/v1")
 DEFAULT_MODEL = os.environ.get("DISTILL_MODEL", "qwen2.5:7b")
 DEFAULT_WORKERS = int(os.environ.get("DISTILL_WORKERS", "4"))
 MAX_TRANSCRIPT_CHARS = 80_000  # ~20k tokens
