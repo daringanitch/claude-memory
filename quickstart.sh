@@ -48,15 +48,23 @@ fi
 
 # ── 3. Pull distillation model ────────────────────────────────────────────────
 echo ""
-echo "▶ Pulling distillation model into in-stack ollama (one-time, ~4.7 GB)..."
-echo "  (Skip if qwen2.5:7b is already present — ollama is idempotent)"
+echo "▶ Waiting for in-stack ollama to be ready..."
 for i in {1..30}; do
   if docker compose exec -T ollama ollama list &>/dev/null; then
     break
   fi
+  if [[ $i -eq 30 ]]; then
+    echo "ERROR: ollama did not become ready within 60 s — check 'docker compose logs ollama'" >&2
+    exit 1
+  fi
   sleep 2
 done
-docker compose exec -T ollama ollama pull qwen2.5:7b
+echo "▶ Pulling distillation model into in-stack ollama (one-time, ~4.7 GB)..."
+if ! docker compose exec -T ollama ollama list | grep -q 'qwen2.5:7b'; then
+  docker compose exec -T ollama ollama pull qwen2.5:7b
+else
+  echo "  qwen2.5:7b already present — skipping pull."
+fi
 
 # ── 4. Distill sessions ────────────────────────────────────────────────────────
 echo ""
