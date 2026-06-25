@@ -54,11 +54,8 @@ def progress(msg):
     print(f"{time.strftime('%Y-%m-%dT%H:%M:%S')}  {msg}", flush=True)
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://claude:memory_pass@localhost:5432/memory")
-# Default: host port 11737, which is the in-stack ollama service as published in docker-compose.yml.
-# When invoked via `docker compose run` the pipeline container is on the compose network, so
-# OLLAMA_URL is overridden to http://ollama:11434/v1 by the caller (e.g. Invoke-ImportPipeline.ps1,
-# import-cron.sh). To use a different host port, change the `ports:` mapping in docker-compose.yml
-# and update this default (or set OLLAMA_URL in your environment).
+# Default points at the host-side published port (11737). When invoked via `docker compose run`,
+# callers must pass -e OLLAMA_URL=http://ollama:11434/v1 to reach the in-stack service.
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11737/v1")
 DEFAULT_MODEL = os.environ.get("DISTILL_MODEL", "qwen2.5:7b")
 DEFAULT_WORKERS = int(os.environ.get("DISTILL_WORKERS", "4"))
