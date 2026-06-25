@@ -34,7 +34,7 @@ echo "[$(date)] Import complete" >> "$LOG"
 
 # Step 2: Distill new sessions into curated memories (via local Ollama)
 $DOCKER compose run --rm -T \
-  -e OLLAMA_URL="http://host.docker.internal:11434/v1" \
+  -e OLLAMA_URL="http://ollama:11434/v1" \
   -v "$SCRIPT_DIR/distill_sessions.py:/app/distill_sessions.py:ro" \
   mcp-server \
   python /app/distill_sessions.py >> "$LOG" 2>&1
@@ -52,7 +52,7 @@ echo "[$(date)] Signal extraction complete" >> "$LOG"
 
 # Step 4: Behavioral pass — LLM extraction of HOW the user works (type:behavior memories)
 $DOCKER compose run --rm -T \
-  -e OLLAMA_URL="http://host.docker.internal:11434/v1" \
+  -e OLLAMA_URL="http://ollama:11434/v1" \
   -v "$HOME/.claude/projects:/root/.claude/projects:ro" \
   -v "$SCRIPT_DIR/behavioral_pass.py:/app/behavioral_pass.py:ro" \
   mcp-server \

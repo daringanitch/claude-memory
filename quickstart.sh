@@ -3,12 +3,13 @@
 # Usage: bash quickstart.sh
 #
 # What this does:
-#   1. Starts Docker services (PostgreSQL + MCP server)
+#   1. Starts Docker services (PostgreSQL + ollama + MCP server)
 #   2. Imports your existing Claude Code session history
-#   3. Distills sessions into durable memories via local Ollama (if running)
-#   4. Extracts behavioral signals (workflow patterns, preferences) without an LLM
-#   5. Registers the MCP server with Claude Code (user scope — all projects)
-#   6. Optionally installs the auto-import LaunchAgent (every 30 min, macOS)
+#   3. Pulls the distillation model (qwen2.5:7b) into the in-stack ollama service
+#   4. Distills sessions into durable memories via in-stack ollama
+#   5. Extracts behavioral signals (workflow patterns, preferences) without an LLM
+#   6. Registers the MCP server with Claude Code (user scope — all projects)
+#   7. Optionally installs the auto-import LaunchAgent (every 30 min, macOS)
 
 set -euo pipefail
 
@@ -45,21 +46,28 @@ else
   echo "  ~/.claude/projects not found — skipping session import."
 fi
 
-# ── 3. Distill sessions ────────────────────────────────────────────────────────
+# ── 3. Pull distillation model ────────────────────────────────────────────────
 echo ""
-if curl -s --max-time 2 http://localhost:11434/api/tags &>/dev/null; then
-  echo "▶ Distilling sessions into durable memories (via Ollama)..."
-  docker compose run --rm -T \
-    -e OLLAMA_URL="http://host.docker.internal:11434/v1" \
-    -v "$SCRIPT_DIR/distill_sessions.py:/app/distill_sessions.py:ro" \
-    mcp-server \
-    python /app/distill_sessions.py
-else
-  echo "  Ollama not running — skipping distillation."
-  echo "  Start Ollama ('ollama serve') and run import-cron.sh to distill later."
-fi
+echo "▶ Pulling distillation model into in-stack ollama (one-time, ~4.7 GB)..."
+echo "  (Skip if qwen2.5:7b is already present — ollama is idempotent)"
+for i in {1..30}; do
+  if docker compose exec -T ollama ollama list &>/dev/null; then
+    break
+  fi
+  sleep 2
+done
+docker compose exec -T ollama ollama pull qwen2.5:7b
 
-# ── 4. Extract behavioral signals ─────────────────────────────────────────────
+# ── 4. Distill sessions ────────────────────────────────────────────────────────
+echo ""
+echo "▶ Distilling sessions into durable memories (via in-stack ollama)..."
+docker compose run --rm -T \
+  -e OLLAMA_URL="http://ollama:11434/v1" \
+  -v "$SCRIPT_DIR/distill_sessions.py:/app/distill_sessions.py:ro" \
+  mcp-server \
+  python /app/distill_sessions.py
+
+# ── 5. Extract behavioral signals ─────────────────────────────────────────────
 echo ""
 echo "▶ Extracting behavioral signals (workflow patterns, preferences)..."
 docker compose run --rm -T \
@@ -68,7 +76,7 @@ docker compose run --rm -T \
   mcp-server \
   python /app/extract_signals.py || true
 
-# ── 5. Register with Claude Code ───────────────────────────────────────────────
+# ── 6. Register with Claude Code ───────────────────────────────────────────────
 echo ""
 echo "▶ Registering with Claude Code (user scope)..."
 if claude mcp get claude-memory &>/dev/null 2>&1; then
@@ -78,7 +86,7 @@ else
   echo "  ✅ Registered."
 fi
 
-# ── 6. LaunchAgent (optional, macOS only) ─────────────────────────────────────
+# ── 7. LaunchAgent (optional, macOS only) ─────────────────────────────────────
 if [[ "$(uname)" == "Darwin" ]]; then
   echo ""
   printf "▶ Install auto-import LaunchAgent (runs every 30 min)? [y/N]: "

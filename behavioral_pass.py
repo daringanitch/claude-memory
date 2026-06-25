@@ -51,6 +51,8 @@ def progress(msg):
     print(f"{time.strftime('%Y-%m-%dT%H:%M:%S')}  {msg}", flush=True)
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://claude:memory_pass@localhost:5432/memory")
+# Default points at the host-side published port (11737). When invoked via `docker compose run`,
+# callers must pass -e OLLAMA_URL=http://ollama:11434/v1 to reach the in-stack service.
 OLLAMA_URL   = os.environ.get("OLLAMA_URL", "http://localhost:11737/v1")
 MODEL        = os.environ.get("DISTILL_MODEL", "qwen2.5:7b")
 MAX_CHARS    = 20_000
