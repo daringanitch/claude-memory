@@ -62,6 +62,7 @@ docker compose exec -T ollama ollama pull qwen2.5:7b
 echo ""
 echo "▶ Distilling sessions into durable memories (via in-stack ollama)..."
 docker compose run --rm -T \
+  -e OLLAMA_URL="http://ollama:11434/v1" \
   -v "$SCRIPT_DIR/distill_sessions.py:/app/distill_sessions.py:ro" \
   mcp-server \
   python /app/distill_sessions.py
