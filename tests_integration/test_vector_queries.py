@@ -14,6 +14,11 @@ We never rely on semantic similarity — only on the SQL execution path
 """
 import json
 
+import pytest
+
+# Every test in this module needs a live pgvector DB.
+pytestmark = pytest.mark.integration
+
 
 # ── _write_guard ─────────────────────────────────────────────────────────────
 def test_write_guard_no_memories_returns_ADD(srv, clean_db):

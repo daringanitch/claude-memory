@@ -28,6 +28,9 @@ import json
 
 import pytest
 
+# Every test in this module needs a live pgvector DB (and the real model).
+pytestmark = pytest.mark.integration
+
 
 @pytest.fixture(scope="module", autouse=True)
 def real_embedder(srv):
