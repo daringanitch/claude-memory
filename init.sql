@@ -27,8 +27,9 @@ CREATE TABLE imported_sessions (
   project          VARCHAR(100) DEFAULT '',
   imported_at      TIMESTAMP    DEFAULT NOW(),
   message_count    INT          DEFAULT 0,
-  distilled        BOOLEAN      DEFAULT FALSE,
-  distill_failures INT          DEFAULT 0
+  distilled         BOOLEAN      DEFAULT FALSE,
+  distill_failures  INT          DEFAULT 0,
+  signals_extracted BOOLEAN      DEFAULT FALSE
 );
 
 CREATE OR REPLACE FUNCTION update_updated_at()
