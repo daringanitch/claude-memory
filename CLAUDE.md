@@ -143,7 +143,7 @@ On first run, automatically prepends a `## User Profile` section to `~/.claude/C
 | Tool | Key Parameters | Purpose |
 |------|---------------|---------|
 | `startup_context` | `project` | **Session-start snapshot** — behavioral signals + recent distilled memories in one compact call; no search query needed |
-| `save_memory` | `content`, `tags[]`, `source`, `project` | Store a memory with auto-embedding; dedup at ≥0.92 cosine similarity |
+| `save_memory` | `content`, `tags[]`, `source`, `project` | Store a memory with auto-embedding; dedup at ≥0.85 cosine similarity (`GUARD_NOOP_THRESHOLD`) |
 | `check_memory` | `content` | Dry-run write guard — returns ADD/UPDATE/NOOP with nearest match preview |
 | `semantic_search` | `query`, `limit`, `min_similarity`, `project`, `since`, `before` | Vector similarity search (cached 10 min) |
 | `search_memories` | `query`, `limit`, `project`, `since`, `before` | Full-text keyword search (cached 10 min) |
@@ -210,7 +210,7 @@ Data is persisted to `./data/postgres/` on the host. The HuggingFace model cache
 
 ```bash
 brew install pytest   # one-time
-pytest tests/ -v      # 106 tests, no Docker or GPU required
+pytest tests/ -v      # 138 tests, no Docker or GPU required
 ```
 
 All heavy dependencies (sentence-transformers, psycopg2, openai) are mocked by `tests/conftest.py`.

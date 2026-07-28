@@ -251,7 +251,7 @@ bash restore.sh backups/claude-memory-2026-03-08T12-00-00.pgdump
 | `find_duplicates` | `threshold`, `limit`, `project`, `scan_limit` | Find near-duplicate memory pairs; `scan_limit` bounds the scan (default 500) |
 | `bulk_delete` | `tag`, `project`, `source`, `dry_run` | Soft-delete all matching memories (`dry_run=True` by default — preview first) |
 | `list_tags` | — | List all tags with occurrence counts |
-| `get_stats` | — | Memory counts by project/source, deleted count, session import and distill status |
+| `get_stats` | — | Memory counts by project/source, deleted count, session import/distill status, and search-cache stats (`entries`, `max_size`, `ttl_seconds`) |
 | `export_memories` | `project`, `tag`, `since`, `before`, `output_format` | Export memories as JSON or markdown |
 
 `since` and `before` accept ISO date strings: `"2026-01-01"` or `"2026-01-01T12:00:00"`.
@@ -290,8 +290,8 @@ docker exec -i claude-memory-db psql -U claude -d memory \
 
 | File | What it adds |
 |------|-------------|
-| `001_soft_deletes.sql` | `deleted_at` column on `memories` |
-| `002_content_hash_dedup.sql` | `content_hash` unique index for insert dedup |
+| `001_add_content_hash_dedup.sql` | `content_hash` unique index for insert dedup |
+| `002_soft_deletes.sql` | `deleted_at` column on `memories` |
 | `003_distill_failure_cap.sql` | `distill_failures` column on `imported_sessions` |
 | `004_signals_extracted.sql` | `signals_extracted` column on `imported_sessions` |
 | `005_content_hash_sha256.sql` | Upgrade `content_hash` from md5 to SHA-256 (pgcrypto) |
@@ -300,7 +300,7 @@ docker exec -i claude-memory-db psql -U claude -d memory \
 
 ```bash
 brew install pytest   # one-time
-pytest tests/ -v      # 76 tests, no Docker or GPU required
+pytest tests/ -v      # 138 tests, no Docker or GPU required
 ```
 
 All heavy dependencies (sentence-transformers, psycopg2, openai) are mocked by `tests/conftest.py`.
