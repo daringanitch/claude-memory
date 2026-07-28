@@ -8,6 +8,13 @@ Persistent vector memory for Claude Code. Stores your Claude sessions, notes, an
 
 | Date | Feature |
 |------|---------|
+| 2026-06-25 | **Ollama readiness hardening** — HTTP healthcheck probe on the Ollama service plus a robust readiness check, so distillation doesn't start before the daemon can serve models (PRs #41/#42) |
+| 2026-06-17 | **Windows/PowerShell support** — ops helpers (`Start-Stack.ps1`, `Stop-Stack.ps1`, `Test-StackHealth.ps1`, `Invoke-ImportPipeline.ps1`, `Backup-Memory.ps1`, `Restore-Memory.ps1`, `Run-IntegrationTests.ps1`) + `POWERSHELL-SCRIPTS.md`; GPU override auto-detected on NVIDIA hosts |
+| 2026-06-17 | **Integration test tier** — `tests_integration/` (real embedder + pgvector queries) marked with `pytest.mark.integration`, kept separate from the mocked `tests/` suite |
+| 2026-06-15 | **In-stack Ollama** — the stack now ships an Ollama service in `docker-compose.yml` (no separate host install); pinned image and `OLLAMA_CONTEXT_LENGTH=16384` fix silent 4096-token truncation of behavioral-pass prompts; host port `11737` avoids colliding with a host-side Ollama; GPU opt-in via `docker-compose.gpu.yml` |
+| 2026-06-04 | **SHA-256 content hashes** — `migrations/005` upgrades `content_hash` from md5 to SHA-256 (pgcrypto); `bulk_delete` and the `DELETE /api/memories` endpoint now default `dry_run` to preview |
+| 2026-06-01 | **Decoupled mcp-server from Ollama** — mcp-server depends only on the DB, so Ollama/GPU changes no longer cascade-recreate it and sever the MCP SSE session |
+| 2026-05-31 | **Pipeline verbosity control** — `-Verbosity {Critical\|Standard\|Detailed}` flag with always-on per-step timing; noisy third-party loggers (httpx, sentence-transformers) silenced |
 | 2026-05-22 | **`user.md` profile generator** — `generate_user_profile.py` synthesizes distilled memories into `~/.claude/user.md` (identity, preferences, working style, active projects, tooling); auto-patches `~/.claude/CLAUDE.md` on first run; runs as step 5 in the 30-min cron pipeline |
 | 2026-05-22 | **Distillation quality improvements** — minimum message-count filters (5 for distill, 10 for behavioral pass) prevent noise from short sessions; post-distill semantic dedup (`DISTILL_DEDUP_THRESHOLD=0.85`) skips same-fact-different-wording duplicates; `GUARD_NOOP_THRESHOLD` lowered 0.92→0.85 and now env-configurable |
 | 2026-05-04 | **Web UI** — single-page React app served at `GET http://localhost:3333/ui`; Timeline River SVG visualization, semantic search with similarity bars, memory detail pane with related memories, full-content reader overlay, preferences dashboard, settings/danger zone |
